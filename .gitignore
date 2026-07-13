@@ -1,0 +1,31 @@
+# Rust — match target/ at any depth (workspace + standalone crates)
+target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Cloned reference engines (large; wildbg has its own repository)
+/external/
+
+# Generated audio assets (regenerated on first run)
+/gui/assets/
+
+# Models & data — ship the trained net + ONNX so the app runs on clone;
+# ignore intermediate checkpoints and generated fixtures.
+/models/*.pt
+!/models/td_latest.pt
+/models/*.onnx
+!/models/td.onnx
+/models/*.json
+/data/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

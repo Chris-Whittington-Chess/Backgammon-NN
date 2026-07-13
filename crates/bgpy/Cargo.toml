@@ -1,0 +1,18 @@
+[package]
+name = "bgpy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Python (PyO3) bindings for the bgcore backgammon engine."
+
+[lib]
+# The Python import name is `bgcore`; produces a cdylib (.pyd/.so).
+name = "bgcore"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Imported as `bgengine` so the crate name doesn't clash with the `bgcore`
+# Python module defined by `#[pymodule]`.
+bgengine = { package = "bgcore", path = "../bgcore" }
+# abi3-py39: build one stable-ABI wheel usable on CPython 3.9+ (incl. 3.14).
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }

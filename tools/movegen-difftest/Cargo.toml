@@ -1,0 +1,11 @@
+[package]
+name = "movegen-difftest"
+edition = "2021"
+version = "0.1.0"
+publish = false
+description = "Differential test: bgcore move generation vs the wildbg reference engine."
+
+[dependencies]
+bgcore = { path = "../../crates/bgcore" }
+# wildbg's move-generation engine (MIT/Apache-2.0), used as an independent oracle.
+engine = { path = "../../external/wildbg/crates/engine" }

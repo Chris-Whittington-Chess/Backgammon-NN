@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/bgcore"]
+# `external/` holds cloned reference engines (their own workspaces); `tools/`
+# holds heavy opt-in validation crates (e.g. the wildbg differential test that
+# pulls tract-onnx). Excluding them keeps `cargo test` at the root fast.
+exclude = ["external", "tools", "crates/bgpy"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[profile.release]
+lto = true
+codegen-units = 1

@@ -1,0 +1,21 @@
+[package]
+name = "bgcore"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Backgammon engine core: board, dice, move generation, evaluators."
+
+[features]
+# Neural-net inference via tract-onnx (pure Rust, no external runtime). Off by
+# default so the core stays dependency-free and offline-buildable.
+onnx = ["dep:tract-onnx"]
+
+[dependencies]
+tract-onnx = { version = "=0.21.7", optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+
+[[example]]
+name = "nn_bench"
+required-features = ["onnx"]

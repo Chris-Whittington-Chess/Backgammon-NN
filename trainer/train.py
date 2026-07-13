@@ -1,0 +1,237 @@
+"""TD(lambda) self-play training loop (SPEC §8, milestone M4).
+
+A single value network learns purely from playing itself. Move selection is
+0-ply negamax on the net's equity, with epsilon-greedy exploration. After each
+game we compute forward-view lambda-returns along the trajectory (handling the
+two-player perspective flip) and regress the net toward them.
+
+Usage:
+    .venv/Scripts/python trainer/train.py [--iters N] [--games G] [--lam L]
+"""
+
+from __future__ import annotations
+
+import argparse
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+import bgcore
+from model import ValueNet, equity, flip, outcome_vector
+
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+
+
+def roll(rng: random.Random) -> tuple[int, int]:
+    return rng.randint(1, 6), rng.randint(1, 6)
+
+
+@torch.no_grad()
+def eval_batch(net: ValueNet, feats: list[list[float]]) -> torch.Tensor:
+    x = torch.from_numpy(np.asarray(feats, dtype=np.float32))
+    return net(x)
+
+
+def choose_next(net, board, d1, d2, epsilon, rng):
+    """Pick a move by 0-ply negamax on net equity (epsilon-greedy).
+
+    Returns (next_board_or_None, terminal_points_or_None). The next board is the
+    resulting position with the turn passed (opponent to move); a non-None points
+    value means the mover just won that many points and the game is over.
+    """
+    children = bgcore.legal_moves(board, d1, d2)  # opponent NOT yet to move
+    term_pts = [c.winner_points() for c in children]
+
+    # Value of each child from the opponent's perspective; mover wants to
+    # minimise it, i.e. maximise (-opp_equity). Terminal wins score their points.
+    vals = eval_batch(net, bgcore.next_state_features(board, d1, d2))
+    mover_eq = (-equity(vals)).clone()
+    for i, p in enumerate(term_pts):
+        if p is not None:
+            mover_eq[i] = float(p)
+
+    if rng.random() < epsilon:
+        i = rng.randrange(len(children))
+    else:
+        i = int(torch.argmax(mover_eq).item())
+
+    if term_pts[i] is not None:
+        return None, term_pts[i]
+    return children[i].swap_perspective(), None
+
+
+def play_game(net, epsilon, rng, max_plies=4000):
+    """Self-play one game; return (feature_list, terminal_points).
+
+    `feature_list[t]` is the 198-vector of decision state s_t (mover's
+    perspective). `terminal_points` is the result from the perspective of the
+    mover of the last state (the side that made the winning move).
+    """
+    board = bgcore.Board.starting()
+    feats = []
+    for _ in range(max_plies):
+        feats.append(board.features())
+        d1, d2 = roll(rng)
+        next_board, pts = choose_next(net, board, d1, d2, epsilon, rng)
+        if pts is not None:
+            return feats, pts
+        board = next_board
+    return feats, 0  # safety; discarded by caller
+
+
+def lambda_targets(net, feats, pts, lam):
+    """Forward-view lambda-returns as regression targets, one per state.
+
+    G[n-1] = terminal outcome (mover of s_{n-1} won `pts`).
+    G[t]   = flip( (1-lam) V(s_{t+1}) + lam G[t+1] ),  t < n-1.
+    The flip carries the return from s_{t+1}'s mover back to s_t's mover.
+    """
+    x = torch.from_numpy(np.asarray(feats, dtype=np.float32))
+    with torch.no_grad():
+        v = net(x)  # [n, 5], each in its own state's mover perspective
+    n = len(feats)
+    g = [None] * n
+    g[n - 1] = torch.tensor(outcome_vector(pts), dtype=torch.float32)
+    for t in range(n - 2, -1, -1):
+        g[t] = flip((1.0 - lam) * v[t + 1] + lam * g[t + 1])
+    return x, torch.stack(g)
+
+
+def train_iter(net, opt, games, epsilon, lam, rng, epochs=1, batch=1024):
+    xs, ts, plies = [], [], 0
+    for _ in range(games):
+        feats, pts = play_game(net, epsilon, rng)
+        if pts == 0:
+            continue
+        x, t = lambda_targets(net, feats, pts, lam)
+        xs.append(x)
+        ts.append(t)
+        plies += len(feats)
+    x_all = torch.cat(xs)
+    t_all = torch.cat(ts)
+
+    total, count = 0.0, 0
+    for _ in range(epochs):
+        perm = torch.randperm(x_all.size(0))
+        for i in range(0, x_all.size(0), batch):
+            idx = perm[i : i + batch]
+            opt.zero_grad()
+            loss = F.mse_loss(net(x_all[idx]), t_all[idx])
+            loss.backward()
+            opt.step()
+            total += loss.item() * idx.numel()
+            count += idx.numel()
+    return plies, total / max(count, 1)
+
+
+# --- Benchmarking (SPEC §13): net vs a fixed opponent, both seats. ---
+
+
+def net_policy(net):
+    def f(board, d1, d2, rng):
+        return choose_next(net, board, d1, d2, 0.0, rng)  # greedy
+
+    return f
+
+
+def random_policy():
+    def f(board, d1, d2, rng):
+        children = bgcore.legal_moves(board, d1, d2)
+        c = children[rng.randrange(len(children))]
+        p = c.winner_points()
+        return (None, p) if p is not None else (c.swap_perspective(), None)
+
+    return f
+
+
+def hce_policy():
+    def f(board, d1, d2, rng):
+        nb = bgcore.hce_move(board, d1, d2)
+        p = nb.winner_points()
+        return (None, p) if p is not None else (nb.swap_perspective(), None)
+
+    return f
+
+
+def play_match_game(p0, p1, rng, max_plies=4000):
+    board = bgcore.Board.starting()
+    on_roll = 0
+    for _ in range(max_plies):
+        d1, d2 = roll(rng)
+        nb, pts = (p0 if on_roll == 0 else p1)(board, d1, d2, rng)
+        if pts is not None:
+            return on_roll, pts
+        board = nb
+        on_roll ^= 1
+    return 0, 1
+
+
+def benchmark(net, opponent, games, rng):
+    """Net vs opponent over `games` games, split evenly between seats.
+    Returns (win_rate, points_per_game) for the net."""
+    net_p = net_policy(net)
+    wins, net_points = 0, 0
+    for g in range(games):
+        net_seat = g % 2
+        p0, p1 = (net_p, opponent) if net_seat == 0 else (opponent, net_p)
+        winner, pts = play_match_game(p0, p1, rng)
+        if winner == net_seat:
+            wins += 1
+            net_points += pts
+        else:
+            net_points -= pts
+    return wins / games, net_points / games
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--iters", type=int, default=40)
+    ap.add_argument("--games", type=int, default=20, help="self-play games per iter")
+    ap.add_argument("--lam", type=float, default=0.7)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--hidden", type=int, default=128)
+    ap.add_argument("--bench-every", type=int, default=5)
+    ap.add_argument("--bench-games", type=int, default=200)
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    torch.manual_seed(args.seed)
+    rng = random.Random(args.seed)
+    net = ValueNet(args.hidden)
+    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
+    MODELS_DIR.mkdir(exist_ok=True)
+
+    print(f"TD(lambda={args.lam}) self-play | hidden={args.hidden} lr={args.lr}")
+    print("Baseline (untrained net):")
+    wr, ppg = benchmark(net, random_policy(), args.bench_games, rng)
+    print(f"  vs Random: win {100*wr:.1f}%  PPG {ppg:+.3f}")
+
+    for it in range(1, args.iters + 1):
+        eps = max(0.02, 0.20 * (0.96 ** it))
+        t0 = time.time()
+        plies, loss = train_iter(net, opt, args.games, eps, args.lam, rng)
+        dt = time.time() - t0
+        line = f"iter {it:3d} | eps {eps:.3f} | plies {plies:5d} | loss {loss:.4f} | {dt:4.1f}s"
+
+        if it % args.bench_every == 0 or it == args.iters:
+            wr_r, ppg_r = benchmark(net, random_policy(), args.bench_games, rng)
+            wr_h, ppg_h = benchmark(net, hce_policy(), args.bench_games, rng)
+            line += (
+                f" || vs Random win {100*wr_r:.1f}% PPG {ppg_r:+.2f}"
+                f" | vs HCE win {100*wr_h:.1f}% PPG {ppg_h:+.2f}"
+            )
+            torch.save(
+                {"model": net.state_dict(), "hidden": args.hidden, "iter": it},
+                MODELS_DIR / "td_latest.pt",
+            )
+        print(line)
+
+    print(f"\nSaved checkpoint to {MODELS_DIR / 'td_latest.pt'}")
+
+
+if __name__ == "__main__":
+    main()
