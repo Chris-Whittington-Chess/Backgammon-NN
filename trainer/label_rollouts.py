@@ -39,17 +39,17 @@ from train import benchmark, hce_policy, net_policy, play_match_game
 MODELS = Path(__file__).resolve().parent.parent / "models"
 
 
-def sample_boards(engine, n, rng, eps=0.15):
+def sample_boards(engine, n, rng, eps=0.15, race_frac=0.0):
     """Collect `n` non-terminal boards (side to move) from net self-play, with
-    `eps` random moves mixed in so the sample spans more of the state space than
-    a purely greedy line would."""
-    out = []
-    while len(out) < n:
+    `eps` random moves mixed in for coverage. `race_frac` of the sample is drawn
+    from pure-race positions (``no_contact``) — that is where gammon-saving lives
+    and where the (now race-aware) rollout labels are trustworthy."""
+    n_race = int(n * race_frac)
+    races, others = [], []
+    while len(races) < n_race or len(others) < n - n_race:
         board = bgcore.Board.starting()
         for _ in range(400):
-            out.append(board)
-            if len(out) >= n:
-                break
+            (races if board.no_contact() else others).append(board)
             d1, d2 = rng.randint(1, 6), rng.randint(1, 6)
             if rng.random() < eps:
                 children = bgcore.legal_moves(board, d1, d2)
@@ -59,7 +59,24 @@ def sample_boards(engine, n, rng, eps=0.15):
             if nb.winner_points() is not None:
                 break
             board = nb.swap_perspective()
-    return out[:n]
+    return races[:n_race] + others[:n - n_race]
+
+
+def self_play_gammon_rate(net, games, rng):
+    """Fraction of greedy 0-ply self-play games that end in a gammon or
+    backgammon — the direct measure of gammon-leaking (competent play ~0.25-0.35
+    cubeless)."""
+    play = net_policy(net)
+    g_or_bg = 0
+    for _ in range(games):
+        board = bgcore.Board.starting()
+        for _ in range(4000):
+            nb, pts = play(board, rng.randint(1, 6), rng.randint(1, 6), rng)
+            if pts is not None:
+                g_or_bg += pts >= 2
+                break
+            board = nb
+    return g_or_bg / games
 
 
 def head_to_head(net_a, net_b, games, rng):
@@ -89,13 +106,16 @@ def main():
     ap.add_argument("--trials", type=int, default=300)
     ap.add_argument("--truncate", type=int, default=0, help="0 = roll to the end")
     ap.add_argument("--candidates", type=int, default=0)
+    ap.add_argument("--race-frac", type=float, default=0.5,
+                    help="fraction of training positions drawn from pure races")
     ap.add_argument("--epochs", type=int, default=120)
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--bench-games", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--promote", action="store_true",
-                    help="if the new net wins the head-to-head, make it td_latest + td.onnx")
+                    help="if the new net gains points vs HCE without losing the "
+                         "head-to-head, make it td_latest + td.onnx")
     args = ap.parse_args()
 
     if not hasattr(bgcore, "Rollouts"):
@@ -111,8 +131,8 @@ def main():
     ro = bgcore.Rollouts(str(MODELS / "td.onnx"), args.trials, args.truncate,
                          args.candidates, args.seed, 0, 0)
 
-    print(f"Sampling {args.positions} positions from self-play…")
-    boards = sample_boards(policy, args.positions, rng)
+    print(f"Sampling {args.positions} positions ({args.race_frac:.0%} pure races)…")
+    boards = sample_boards(policy, args.positions, rng, race_frac=args.race_frac)
 
     kind = "full games" if args.truncate == 0 else f"{args.truncate}-ply trunc"
     print(f"Labelling with rollouts ({args.trials} trials, {kind})…")
@@ -164,20 +184,29 @@ def main():
                 "iter": ck.get("iter")}, out)
     print(f"saved fine-tuned net to {out}")
 
-    # --- The real test: does it play better? 0-ply vs 0-ply. ---
-    print(f"\nHead-to-head ({args.bench_games} games, seats swapped):")
+    # --- The real test: does it leak fewer gammons and score more points? ---
     net.eval()
+    print(f"\nSelf-play gammon+bg rate (lower = fewer gammons leaked):")
+    gr_old = self_play_gammon_rate(base_net, args.bench_games, random.Random(args.seed + 3))
+    gr_new = self_play_gammon_rate(net, args.bench_games, random.Random(args.seed + 3))
+    print(f"  starting net:  {100 * gr_old:.1f}%     fine-tuned:  {100 * gr_new:.1f}%")
+
+    print(f"\nHead-to-head & points ({args.bench_games} games, seats swapped):")
     wr = head_to_head(net, base_net, args.bench_games, random.Random(args.seed + 1))
-    print(f"  fine-tuned vs starting net:  {100 * wr:.1f}% wins")
     hce = hce_policy()
     wr_new, ppg_new = benchmark(net, hce, args.bench_games, random.Random(args.seed + 2))
     wr_old, ppg_old = benchmark(base_net, hce, args.bench_games, random.Random(args.seed + 2))
+    print(f"  fine-tuned vs starting net:  {100 * wr:.1f}% wins")
     print(f"  fine-tuned vs HCE:  {100 * wr_new:.1f}%  PPG {ppg_new:+.3f}")
     print(f"  starting   vs HCE:  {100 * wr_old:.1f}%  PPG {ppg_old:+.3f}")
 
-    stronger = wr > 0.52
+    # Stronger = more points per game vs the fixed HCE (gammons count), while not
+    # losing the head-to-head. Points is the gammon-sensitive metric.
+    stronger = ppg_new > ppg_old + 0.05 and wr >= 0.48
     verdict = "STRONGER" if stronger else "not clearly stronger"
-    print(f"\nVerdict: fine-tuned net is {verdict} ({100 * wr:.1f}% head-to-head).")
+    print(f"\nVerdict: fine-tuned net is {verdict} "
+          f"(PPG {ppg_old:+.3f} -> {ppg_new:+.3f}, gammon rate "
+          f"{100 * gr_old:.0f}% -> {100 * gr_new:.0f}%).")
 
     if args.promote and stronger:
         shutil.copyfile(out, MODELS / "td_latest.pt")
@@ -185,7 +214,7 @@ def main():
         subprocess.run([sys.executable, str(Path(__file__).parent / "export_onnx.py"),
                         str(MODELS / "td_latest.pt")], check=True)
     elif args.promote:
-        print("not promoting — head-to-head edge too small.")
+        print("not promoting — no clear points gain.")
 
 
 if __name__ == "__main__":
