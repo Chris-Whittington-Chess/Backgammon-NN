@@ -403,10 +403,10 @@ class MainWindow(QMainWindow):
         onnx_path = ROOT / "models" / "td.onnx"
         self._cube_ro = None
         if hasattr(bgcore, "Rollouts") and onnx_path.exists():
-            ro = RolloutEngine(onnx_path, trials=180, truncate_plies=9, candidates=5)
+            ro = RolloutEngine(onnx_path, movetime_ms=800, truncate_plies=9, candidates=5)
             self.opponents[ro.name] = ro
-            # A dedicated rollout evaluator for cube decisions (no candidate filter).
-            self._cube_ro = bgcore.Rollouts(str(onnx_path), 150, 9, 0, 7)
+            # Rollout evaluator for cube decisions — movetime-budgeted, no filter.
+            self._cube_ro = bgcore.Rollouts(str(onnx_path), 0, 9, 0, 7, 400, 0)
         self.opponents["HCE (heuristic)"] = HceEngine()
         self.opponents["Random"] = RandomEngine()
         self.hint_engine = neural1 or self.opponents["HCE (heuristic)"]

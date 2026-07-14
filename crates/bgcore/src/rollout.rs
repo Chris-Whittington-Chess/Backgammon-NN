@@ -26,7 +26,7 @@ use rayon::prelude::*;
 /// Parameters for a rollout.
 #[derive(Clone, Debug)]
 pub struct RolloutConfig {
-    /// Number of playouts averaged per position.
+    /// Number of playouts averaged per position (ignored when `movetime_ms > 0`).
     pub trials: usize,
     /// Evaluate the leaf with the net after this many plies; `0` plays to the end.
     pub truncate_plies: usize,
@@ -34,13 +34,27 @@ pub struct RolloutConfig {
     pub candidates: usize,
     /// Base seed — fixed across candidates for common random numbers.
     pub seed: u64,
+    /// If non-zero, roll out until this many milliseconds elapse instead of a
+    /// fixed `trials` count (for a move, the budget is split across candidates).
+    pub movetime_ms: u64,
+    /// Worker threads; `0` uses the global rayon pool (honours RAYON_NUM_THREADS).
+    pub threads: usize,
 }
 
 impl Default for RolloutConfig {
     fn default() -> Self {
-        RolloutConfig { trials: 180, truncate_plies: 11, candidates: 6, seed: 0x5EED }
+        RolloutConfig {
+            trials: 180,
+            truncate_plies: 11,
+            candidates: 6,
+            seed: 0x5EED,
+            movetime_ms: 0,
+            threads: 0,
+        }
     }
 }
+
+const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// 0-ply value of a resulting position to the side that just moved.
 fn shallow<E: Evaluator>(r: &Board, eval: &E) -> f32 {
@@ -86,24 +100,49 @@ fn rollout_once<E: Evaluator>(board: &Board, eval: &E, truncate: usize, rng: &mu
     }
 }
 
-/// Expected equity for the side to move at `board`, from `cfg.trials` truncated
-/// rollouts run in parallel.
+/// Expected equity for the side to move at `board`, from parallel truncated
+/// rollouts — a fixed `cfg.trials` count, or (if `cfg.movetime_ms > 0`) as many
+/// as fit in the time budget.
 pub fn rollout_equity<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutConfig) -> f32 {
+    if cfg.movetime_ms > 0 {
+        return rollout_timed(board, eval, cfg);
+    }
     if cfg.trials == 0 {
         return eval.evaluate(board).equity();
     }
     let sum: f32 = (0..cfg.trials)
         .into_par_iter()
         .map(|t| {
-            let mut rng = Rng::new(
-                cfg.seed
-                    .wrapping_add(t as u64 + 1)
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15),
-            );
+            let mut rng = Rng::new(cfg.seed.wrapping_add(t as u64 + 1).wrapping_mul(GOLDEN));
             rollout_once(board, eval, cfg.truncate_plies, &mut rng)
         })
         .sum();
     sum / cfg.trials as f32
+}
+
+/// Roll out in parallel batches until the movetime budget elapses.
+fn rollout_timed<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutConfig) -> f32 {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_millis(cfg.movetime_ms);
+    let batch: u64 = 64;
+    let mut total = 0.0f32;
+    let mut count = 0u64;
+    loop {
+        let base = count;
+        let s: f32 = (0..batch)
+            .into_par_iter()
+            .map(|t| {
+                let mut rng = Rng::new(cfg.seed.wrapping_add(base + t + 1).wrapping_mul(GOLDEN));
+                rollout_once(board, eval, cfg.truncate_plies, &mut rng)
+            })
+            .sum();
+        total += s;
+        count += batch;
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    total / count as f32
 }
 
 /// Pick the best move by rolling out the top candidates (with common random
@@ -114,6 +153,17 @@ pub fn rollout_best<E: Evaluator + Sync>(
     eval: &E,
     cfg: &RolloutConfig,
 ) -> Move {
+    rollout_best_scored(board, dice, eval, cfg).0
+}
+
+/// As [`rollout_best`], but also returns the chosen move's rollout equity (from
+/// the mover's perspective).
+pub fn rollout_best_scored<E: Evaluator + Sync>(
+    board: &Board,
+    dice: &Dice,
+    eval: &E,
+    cfg: &RolloutConfig,
+) -> (Move, f32) {
     let mut moves = genmoves(board, dice);
 
     let mut order: Vec<usize> = (0..moves.len()).collect();
@@ -126,19 +176,25 @@ pub fn rollout_best<E: Evaluator + Sync>(
         order.truncate(cfg.candidates);
     }
 
+    // Under a movetime budget, share it across the candidates being rolled out.
+    let mut cc = cfg.clone();
+    if cfg.movetime_ms > 0 {
+        cc.movetime_ms = (cfg.movetime_ms / order.len().max(1) as u64).max(1);
+    }
+
     let mut best_i = order[0];
     let mut best = f32::NEG_INFINITY;
     for &i in &order {
         let s = match result(&moves[i].result) {
             GameResult::MoverWins(p) => p as f32,
-            _ => -rollout_equity(&moves[i].result.swap_perspective(), eval, cfg),
+            _ => -rollout_equity(&moves[i].result.swap_perspective(), eval, &cc),
         };
         if s > best {
             best = s;
             best_i = i;
         }
     }
-    moves.swap_remove(best_i)
+    (moves.swap_remove(best_i), best)
 }
 
 /// An [`Engine`] that picks its move by rolling out the top candidates and
@@ -148,21 +204,36 @@ pub struct RolloutEngine<E: Evaluator + Sync> {
     eval: E,
     cfg: RolloutConfig,
     name: String,
+    pool: Option<rayon::ThreadPool>,
 }
 
 impl<E: Evaluator + Sync> RolloutEngine<E> {
     pub fn new(eval: E, cfg: RolloutConfig, name: impl Into<String>) -> Self {
-        RolloutEngine { eval, cfg, name: name.into() }
+        let pool = build_pool(cfg.threads);
+        RolloutEngine { eval, cfg, name: name.into(), pool }
     }
 }
 
 impl<E: Evaluator + Sync> Engine for RolloutEngine<E> {
     fn choose(&mut self, board: &Board, dice: &Dice) -> Move {
-        rollout_best(board, dice, &self.eval, &self.cfg)
+        match &self.pool {
+            Some(pool) => pool.install(|| rollout_best(board, dice, &self.eval, &self.cfg)),
+            None => rollout_best(board, dice, &self.eval, &self.cfg),
+        }
     }
 
     fn name(&self) -> &str {
         &self.name
+    }
+}
+
+/// Build a dedicated rayon pool with `threads` workers, or `None` (global pool)
+/// when `threads == 0`.
+pub fn build_pool(threads: usize) -> Option<rayon::ThreadPool> {
+    if threads == 0 {
+        None
+    } else {
+        rayon::ThreadPoolBuilder::new().num_threads(threads).build().ok()
     }
 }
 
@@ -173,7 +244,7 @@ mod tests {
 
     #[test]
     fn rollout_equity_is_finite_and_bounded() {
-        let cfg = RolloutConfig { trials: 24, truncate_plies: 6, candidates: 0, seed: 1 };
+        let cfg = RolloutConfig { trials: 24, truncate_plies: 6, candidates: 0, seed: 1, ..Default::default() };
         let v = rollout_equity(&Board::starting_position(), &HceEval::new(), &cfg);
         assert!(v.is_finite() && v.abs() <= 3.0, "value {v}");
     }
@@ -184,14 +255,30 @@ mod tests {
         let mut b = Board::empty();
         b.set_point(1, 15);
         b.set_point(2, -15);
-        let cfg = RolloutConfig { trials: 40, truncate_plies: 0, candidates: 0, seed: 2 };
+        let cfg = RolloutConfig { trials: 40, truncate_plies: 0, candidates: 0, seed: 2, ..Default::default() };
         let v = rollout_equity(&b, &HceEval::new(), &cfg);
         assert!(v > 0.7, "a won position rolled out to {v}");
     }
 
     #[test]
+    fn movetime_runs_within_its_budget() {
+        let cfg = RolloutConfig {
+            movetime_ms: 60,
+            truncate_plies: 8,
+            candidates: 0,
+            seed: 3,
+            ..Default::default()
+        };
+        let t = std::time::Instant::now();
+        let v = rollout_equity(&Board::starting_position(), &HceEval::new(), &cfg);
+        let ms = t.elapsed().as_millis();
+        assert!(v.is_finite() && v.abs() <= 3.0);
+        assert!((50..2000).contains(&ms), "movetime rollout took {ms}ms");
+    }
+
+    #[test]
     fn common_random_numbers_are_deterministic() {
-        let cfg = RolloutConfig { trials: 32, truncate_plies: 8, candidates: 0, seed: 7 };
+        let cfg = RolloutConfig { trials: 32, truncate_plies: 8, candidates: 0, seed: 7, ..Default::default() };
         let b = Board::starting_position();
         let a = rollout_equity(&b, &HceEval::new(), &cfg);
         let c = rollout_equity(&b, &HceEval::new(), &cfg);

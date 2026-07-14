@@ -226,36 +226,54 @@ fn hce_move(board: &PyBoard, d1: u8, d2: u8) -> PyBoard {
 struct Rollouts {
     nn: bgengine::eval::NnEval,
     cfg: bgengine::RolloutConfig,
+    pool: Option<rayon::ThreadPool>,
 }
 
 #[cfg(feature = "onnx")]
 #[pymethods]
 impl Rollouts {
     #[new]
-    #[pyo3(signature = (onnx_path, trials = 180, truncate_plies = 11, candidates = 6, seed = 0x5EED))]
+    #[pyo3(signature = (onnx_path, trials = 180, truncate_plies = 11, candidates = 6, seed = 0x5EED, movetime_ms = 0, threads = 0))]
     fn new(
         onnx_path: &str,
         trials: usize,
         truncate_plies: usize,
         candidates: usize,
         seed: u64,
+        movetime_ms: u64,
+        threads: usize,
     ) -> PyResult<Self> {
         let nn = bgengine::eval::NnEval::from_path(onnx_path).map_err(PyValueError::new_err)?;
-        Ok(Rollouts {
-            nn,
-            cfg: bgengine::RolloutConfig { trials, truncate_plies, candidates, seed },
-        })
+        let cfg = bgengine::RolloutConfig {
+            trials,
+            truncate_plies,
+            candidates,
+            seed,
+            movetime_ms,
+            threads,
+        };
+        let pool = bgengine::build_pool(threads);
+        Ok(Rollouts { nn, cfg, pool })
     }
 
     /// Rollout equity for the side to move at `board`.
     fn equity(&self, board: &PyBoard) -> f32 {
-        bgengine::rollout_equity(&board.inner, &self.nn, &self.cfg)
+        match &self.pool {
+            Some(p) => p.install(|| bgengine::rollout_equity(&board.inner, &self.nn, &self.cfg)),
+            None => bgengine::rollout_equity(&board.inner, &self.nn, &self.cfg),
+        }
     }
 
-    /// The move (resulting board) the rollout engine plays for dice `d1, d2`.
-    fn best_move(&self, board: &PyBoard, d1: u8, d2: u8) -> PyBoard {
-        let mv = bgengine::rollout_best(&board.inner, &Dice::new(d1, d2), &self.nn, &self.cfg);
-        PyBoard { inner: mv.result }
+    /// The rollout engine's move for dice `d1, d2` as `(result_board, equity)`,
+    /// where equity is from the mover's perspective.
+    fn best_move(&self, board: &PyBoard, d1: u8, d2: u8) -> (PyBoard, f32) {
+        let dice = Dice::new(d1, d2);
+        let f = || bgengine::rollout_best_scored(&board.inner, &dice, &self.nn, &self.cfg);
+        let (mv, eq) = match &self.pool {
+            Some(p) => p.install(f),
+            None => f(),
+        };
+        (PyBoard { inner: mv.result }, eq)
     }
 }
 

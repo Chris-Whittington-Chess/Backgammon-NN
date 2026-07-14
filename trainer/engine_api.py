@@ -79,18 +79,17 @@ class RolloutEngine(BaseEngine):
     which needs the onnx-feature bindings). Strong but heavy — a second or so per
     move at these settings."""
 
-    def __init__(self, onnx_path, trials=80, truncate_plies=6, candidates=3, seed=1):
-        self._ro = bgcore.Rollouts(str(onnx_path), trials, truncate_plies, candidates, seed)
-        self.name = f"Rollout ({trials}×{truncate_plies})"
+    def __init__(self, onnx_path, trials=0, truncate_plies=9, candidates=5, seed=1,
+                 movetime_ms=800, threads=0):
+        self._ro = bgcore.Rollouts(
+            str(onnx_path), trials, truncate_plies, candidates, seed, movetime_ms, threads)
+        self.name = (f"Rollout ({movetime_ms}ms)" if movetime_ms
+                     else f"Rollout ({trials}×{truncate_plies})")
 
     def analyze(self, board, d1, d2):
-        chosen = self._ro.best_move(board, d1, d2)
+        chosen, eq = self._ro.best_move(board, d1, d2)  # eq: mover's perspective
         steps = next(
             (s for s, r in bgcore.legal_moves_with_steps(board, d1, d2) if r == chosen), []
-        )
-        pts = chosen.winner_points()
-        eq = float(pts) if (pts is not None and pts > 0) else -self._ro.equity(
-            chosen.swap_perspective()
         )
         return [(steps, chosen, eq)]
 

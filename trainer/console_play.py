@@ -60,7 +60,7 @@ def human_move(board, d1, d2):
 
 def make_engine(name, ply):
     if name == "rollout":
-        return RolloutEngine(MODEL.parent / "td.onnx", trials=120, truncate_plies=8, candidates=4)
+        return RolloutEngine(MODEL.parent / "td.onnx", movetime_ms=600, candidates=4)
     if name == "neural" and MODEL.exists():
         return NeuralEngine(MODEL, lookahead=ply)
     if name == "random":

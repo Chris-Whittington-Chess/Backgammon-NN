@@ -13,7 +13,7 @@ fn main() {
     println!("Monte-Carlo rollouts — {threads} threads\n");
 
     // Sanity: rollout equities should be sensible.
-    let cfg = RolloutConfig { trials: 200, truncate_plies: 9, candidates: 0, seed: 0x5EED };
+    let cfg = RolloutConfig { trials: 200, truncate_plies: 9, candidates: 0, seed: 0x5EED, ..Default::default() };
     let t0 = Instant::now();
     let eq = rollout_equity(&Board::starting_position(), &nn, &cfg);
     println!(
@@ -29,7 +29,7 @@ fn main() {
 
     // Rollout engine vs 1-ply search — same net. Pairs from argv[1] (default 3).
     let pairs: u32 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(3);
-    let mcfg = RolloutConfig { trials: 64, truncate_plies: 6, candidates: 3, seed: 0x5EED };
+    let mcfg = RolloutConfig { trials: 64, truncate_plies: 6, candidates: 3, seed: 0x5EED, ..Default::default() };
     let t1 = Instant::now();
     let mut a = RolloutEngine::new(&nn, mcfg, "NN-rollout");
     let mut b = SearchEngine::new(&nn, 1, "NN-1ply");

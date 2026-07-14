@@ -67,7 +67,7 @@ fn main() {
     {
         // Parallel Monte-Carlo rollouts vs 1-ply. Rollouts are heavy — few games.
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        let cfg = RolloutConfig { trials: 80, truncate_plies: 7, candidates: 3, seed: 0x5EED };
+        let cfg = RolloutConfig { trials: 80, truncate_plies: 7, candidates: 3, seed: 0x5EED, ..Default::default() };
         let t0 = Instant::now();
         let mut a = RolloutEngine::new(&nn, cfg, "NN-rollout");
         let mut b = SearchEngine::new(&nn, 1, "NN-1ply");
