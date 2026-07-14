@@ -182,6 +182,23 @@ impl Board {
         (1..=NUM_POINTS).rev().find(|&p| self.points[p] > 0).unwrap_or(0)
     }
 
+    /// True once the two sides have passed each other and can no longer
+    /// interact — a pure race. The mover runs high→low (24→off), the opponent
+    /// low→high, so contact is impossible exactly when the mover's rearmost
+    /// checker sits below the opponent's rearmost. Checkers on the bar always
+    /// mean contact.
+    pub fn no_contact(&self) -> bool {
+        if self.bar[MOVER] > 0 || self.bar[OPP] > 0 {
+            return false;
+        }
+        let mover_max = (1..=NUM_POINTS).rev().find(|&p| self.points[p] > 0);
+        let opp_min = (1..=NUM_POINTS).find(|&p| self.points[p] < 0);
+        match (mover_max, opp_min) {
+            (Some(m), Some(o)) => m < o,
+            _ => true, // a side already off the board can't be contacted
+        }
+    }
+
     /// True if point `to` (`1..=24`) is blocked for the mover, i.e. held by two
     /// or more opponent checkers.
     #[inline]
@@ -291,5 +308,31 @@ mod tests {
         b.set_point(1, 14); // 14 checkers on the ace point
         assert_eq!(b.checker_total(MOVER), CHECKERS_PER_SIDE);
         assert_eq!(b.pip_count(MOVER), 14 + BAR_PIPS);
+    }
+
+    #[test]
+    fn no_contact_detects_races() {
+        // Starting position: fully engaged.
+        assert!(!Board::starting_position().no_contact());
+
+        // Mover all on point 5, opponent all on point 8 — mover's rearmost (5)
+        // is below the opponent's rearmost (8), so they have passed: a race.
+        let mut race = Board::empty();
+        race.set_point(5, 15);
+        race.set_point(8, -15);
+        assert!(race.no_contact());
+
+        // Overlap: mover has a straggler on 20, above the opponent on 8.
+        let mut touching = Board::empty();
+        touching.set_point(5, 14);
+        touching.set_point(20, 1);
+        touching.set_point(8, -15);
+        assert!(!touching.no_contact());
+
+        // A checker on the bar is always contact.
+        let mut barred = race.clone();
+        barred.set_bar(MOVER, 1);
+        barred.set_point(5, 14);
+        assert!(!barred.no_contact());
     }
 }

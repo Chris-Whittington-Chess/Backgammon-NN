@@ -74,6 +74,13 @@ impl PyBoard {
         self.inner.off(side)
     }
 
+    /// True once the sides have passed each other — a pure race (no hits or
+    /// blocking possible). Used to focus gammon-saving training on positions
+    /// whose rollout labels are trustworthy.
+    fn no_contact(&self) -> bool {
+        self.inner.no_contact()
+    }
+
     /// This position viewed from the opponent's side (turn passed).
     fn swap_perspective(&self) -> PyBoard {
         PyBoard {

@@ -64,6 +64,39 @@ fn shallow<E: Evaluator>(r: &Board, eval: &E) -> f32 {
     }
 }
 
+/// Choose the playout move and return its index into `moves`.
+///
+/// Once the sides have passed (a pure race), the net is a weak and biased guide
+/// — it blunders bear-offs and so wildly over-produces gammons, poisoning any
+/// rollout labels. There, blots are irrelevant and the only goal is to get home
+/// and off fastest, which minimising the resulting pip count does near-optimally
+/// (it also races the back checkers home to save the gammon when behind).
+/// Otherwise fall back to greedy 0-ply on the evaluator.
+fn pick_playout<E: Evaluator>(b: &Board, moves: &[Move], eval: &E) -> usize {
+    if b.no_contact() {
+        let mut best_i = 0;
+        let mut best = i32::MAX;
+        for (i, m) in moves.iter().enumerate() {
+            let pip = m.result.pip_count(crate::board::MOVER);
+            if pip < best {
+                best = pip;
+                best_i = i;
+            }
+        }
+        return best_i;
+    }
+    let mut best_i = 0;
+    let mut best = f32::NEG_INFINITY;
+    for (i, m) in moves.iter().enumerate() {
+        let s = shallow(&m.result, eval);
+        if s > best {
+            best = s;
+            best_i = i;
+        }
+    }
+    best_i
+}
+
 /// One truncated playout from `board`, returning equity **from the perspective
 /// of `board`'s side to move**. Uses a 0-ply policy (greedy on `eval`).
 fn rollout_once<E: Evaluator>(board: &Board, eval: &E, truncate: usize, rng: &mut Rng) -> f32 {
@@ -82,16 +115,7 @@ fn rollout_once<E: Evaluator>(board: &Board, eval: &E, truncate: usize, rng: &mu
         }
 
         let moves = genmoves(&b, &rng.roll());
-        let mut best_i = 0;
-        let mut best = f32::NEG_INFINITY;
-        for (i, m) in moves.iter().enumerate() {
-            let s = shallow(&m.result, eval);
-            if s > best {
-                best = s;
-                best_i = i;
-            }
-        }
-        let chosen = &moves[best_i];
+        let chosen = &moves[pick_playout(&b, &moves, eval)];
         if let GameResult::MoverWins(p) = result(&chosen.result) {
             return sign * p as f32; // the side that just moved won
         }
@@ -238,16 +262,7 @@ fn rollout_once_dist<E: Evaluator>(
             return orient([v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg], plies);
         }
         let moves = genmoves(&b, &rng.roll());
-        let mut best_i = 0;
-        let mut best = f32::NEG_INFINITY;
-        for (i, m) in moves.iter().enumerate() {
-            let s = shallow(&m.result, eval);
-            if s > best {
-                best = s;
-                best_i = i;
-            }
-        }
-        let chosen = &moves[best_i];
+        let chosen = &moves[pick_playout(&b, &moves, eval)];
         if let GameResult::MoverWins(p) = result(&chosen.result) {
             return orient(win_vec(p), plies);
         }
@@ -346,6 +361,7 @@ pub fn build_pool(threads: usize) -> Option<rayon::ThreadPool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::MOVER;
     use crate::eval::HceEval;
 
     #[test]
@@ -364,6 +380,30 @@ mod tests {
         let cfg = RolloutConfig { trials: 40, truncate_plies: 0, candidates: 0, seed: 2, ..Default::default() };
         let v = rollout_equity(&b, &HceEval::new(), &cfg);
         assert!(v > 0.7, "a won position rolled out to {v}");
+    }
+
+    #[test]
+    fn race_policy_saves_the_gammon() {
+        // Pure race, no contact. Mover has 10 off and 5 on the ace point — it
+        // needs ~3 rolls to finish. The opponent has 0 off but all 15 checkers
+        // in its OWN home board (mover-relative points 19..=24), so it gets two
+        // or three turns first. Any competent race play bears off several
+        // checkers in that time, so a gammon (opponent bears off none) should
+        // be rare and a backgammon (a checker still stuck deep) rarer still.
+        let mut b = Board::empty();
+        b.set_off(MOVER, 10);
+        b.set_point(1, 5);
+        b.set_point(24, -3);
+        b.set_point(23, -3);
+        b.set_point(22, -3);
+        b.set_point(21, -3);
+        b.set_point(20, -3);
+        assert!(b.no_contact());
+        let cfg = RolloutConfig { trials: 200, truncate_plies: 0, candidates: 0, seed: 4, ..Default::default() };
+        let d = rollout_dist(&b, &HceEval::new(), &cfg);
+        assert!(d[0] > 0.9, "mover should almost always win, win={}", d[0]);
+        assert!(d[1] < 0.1, "gammon should be rare with good race play, win_g={}", d[1]);
+        assert!(d[2] < 0.02, "backgammon should be very rare, win_bg={}", d[2]);
     }
 
     #[test]
