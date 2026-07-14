@@ -264,6 +264,16 @@ impl Rollouts {
         }
     }
 
+    /// Rollout outcome distribution for the side to move at `board`, as
+    /// `[win, win_g, win_bg, lose_g, lose_bg]` — the 5 training targets.
+    fn dist(&self, board: &PyBoard) -> Vec<f32> {
+        let f = || bgengine::rollout_dist(&board.inner, &self.nn, &self.cfg);
+        match &self.pool {
+            Some(p) => p.install(f).to_vec(),
+            None => f().to_vec(),
+        }
+    }
+
     /// The rollout engine's move for dice `d1, d2` as `(result_board, equity)`,
     /// where equity is from the mover's perspective.
     fn best_move(&self, board: &PyBoard, d1: u8, d2: u8) -> (PyBoard, f32) {

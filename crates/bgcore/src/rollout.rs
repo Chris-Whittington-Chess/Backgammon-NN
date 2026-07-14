@@ -197,6 +197,112 @@ pub fn rollout_best_scored<E: Evaluator + Sync>(
     (moves.swap_remove(best_i), best)
 }
 
+// --- Outcome-distribution rollouts (for training labels & cube decisions) ---
+
+fn win_vec(points: u8) -> [f32; 5] {
+    [1.0, (points >= 2) as u8 as f32, (points >= 3) as u8 as f32, 0.0, 0.0]
+}
+
+/// Convert an opponent-perspective 5-vector to the mover's, matching the trainer:
+/// `[w, wg, wbg, lg, lbg] -> [1-w, lg, lbg, wg, wbg]`.
+fn flip5(v: [f32; 5]) -> [f32; 5] {
+    [1.0 - v[0], v[3], v[4], v[1], v[2]]
+}
+
+fn orient(v: [f32; 5], plies: usize) -> [f32; 5] {
+    if plies.is_multiple_of(2) {
+        v
+    } else {
+        flip5(v)
+    }
+}
+
+/// One playout, returning the outcome distribution `[win, win_g, win_bg,
+/// lose_g, lose_bg]` from the perspective of `board`'s side to move.
+fn rollout_once_dist<E: Evaluator>(
+    board: &Board,
+    eval: &E,
+    truncate: usize,
+    rng: &mut Rng,
+) -> [f32; 5] {
+    let mut b = board.clone();
+    let mut plies = 0usize;
+    loop {
+        match result(&b) {
+            GameResult::MoverWins(p) => return orient(win_vec(p), plies),
+            GameResult::OppWins(p) => return orient(win_vec(p), plies + 1),
+            GameResult::InProgress => {}
+        }
+        if truncate > 0 && plies >= truncate {
+            let v = eval.evaluate(&b);
+            return orient([v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg], plies);
+        }
+        let moves = genmoves(&b, &rng.roll());
+        let mut best_i = 0;
+        let mut best = f32::NEG_INFINITY;
+        for (i, m) in moves.iter().enumerate() {
+            let s = shallow(&m.result, eval);
+            if s > best {
+                best = s;
+                best_i = i;
+            }
+        }
+        let chosen = &moves[best_i];
+        if let GameResult::MoverWins(p) = result(&chosen.result) {
+            return orient(win_vec(p), plies);
+        }
+        b = chosen.result.swap_perspective();
+        plies += 1;
+    }
+}
+
+fn add5(a: [f32; 5], b: [f32; 5]) -> [f32; 5] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4]]
+}
+
+/// Mean outcome distribution for the side to move at `board`, from parallel
+/// truncated rollouts (fixed `trials`, or `movetime_ms` if set).
+pub fn rollout_dist<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutConfig) -> [f32; 5] {
+    let mean = |sums: [f32; 5], n: f32| [sums[0] / n, sums[1] / n, sums[2] / n, sums[3] / n, sums[4] / n];
+
+    if cfg.movetime_ms > 0 {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_millis(cfg.movetime_ms);
+        let batch: u64 = 64;
+        let mut total = [0.0f32; 5];
+        let mut count = 0u64;
+        loop {
+            let base = count;
+            let s = (0..batch)
+                .into_par_iter()
+                .map(|t| {
+                    let mut rng = Rng::new(cfg.seed.wrapping_add(base + t + 1).wrapping_mul(GOLDEN));
+                    rollout_once_dist(board, eval, cfg.truncate_plies, &mut rng)
+                })
+                .reduce(|| [0.0; 5], add5);
+            total = add5(total, s);
+            count += batch;
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        return mean(total, count as f32);
+    }
+
+    if cfg.trials == 0 {
+        let v = eval.evaluate(board);
+        return [v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg];
+    }
+    let sums = (0..cfg.trials)
+        .into_par_iter()
+        .map(|t| {
+            let mut rng = Rng::new(cfg.seed.wrapping_add(t as u64 + 1).wrapping_mul(GOLDEN));
+            rollout_once_dist(board, eval, cfg.truncate_plies, &mut rng)
+        })
+        .reduce(|| [0.0; 5], add5);
+    mean(sums, cfg.trials as f32)
+}
+
 /// An [`Engine`] that picks its move by rolling out the top candidates and
 /// choosing the highest rollout equity. Far stronger than static/1-ply play,
 /// and much heavier — meant for strong play and for labelling training data.
@@ -283,5 +389,22 @@ mod tests {
         let a = rollout_equity(&b, &HceEval::new(), &cfg);
         let c = rollout_equity(&b, &HceEval::new(), &cfg);
         assert_eq!(a, c, "same seed must give the same estimate");
+    }
+
+    #[test]
+    fn dist_is_a_coherent_distribution() {
+        let cfg = RolloutConfig { trials: 64, truncate_plies: 0, candidates: 0, seed: 5, ..Default::default() };
+        let d = rollout_dist(&Board::starting_position(), &HceEval::new(), &cfg);
+        // Every component is a frequency in [0, 1].
+        assert!(d.iter().all(|&x| (0.0..=1.0).contains(&x)), "{d:?}");
+        // Nested outcomes: win >= win_g >= win_bg, and lose_g >= lose_bg.
+        assert!(d[0] >= d[1] - 1e-6 && d[1] >= d[2] - 1e-6, "win nesting {d:?}");
+        assert!(d[3] >= d[4] - 1e-6, "lose nesting {d:?}");
+        // A near-even opening: win probability should sit around a half.
+        assert!((0.3..0.7).contains(&d[0]), "opening win prob {}", d[0]);
+        // Equity from the distribution matches rollout_equity closely.
+        let eq_from_dist = (2.0 * d[0] - 1.0) + d[1] + d[2] - d[3] - d[4];
+        let eq = rollout_equity(&Board::starting_position(), &HceEval::new(), &cfg);
+        assert!((eq_from_dist - eq).abs() < 0.15, "eq {eq} vs from dist {eq_from_dist}");
     }
 }
