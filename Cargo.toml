@@ -9,7 +9,7 @@ exclude = ["external", "tools", "crates/bgpy"]
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
-license = "MIT"
+license = "LicenseRef-Proprietary"  # Copyright © Chris Whittington 2026. All Rights Reserved.
 
 [profile.release]
 lto = true

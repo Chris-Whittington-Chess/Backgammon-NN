@@ -88,7 +88,7 @@ Possible next steps: deeper search, the doubling cube, and richer features.
 
 ## License
 
-MIT.
+Copyright © Chris Whittington 2026. All Rights Reserved.
 
 ## Acknowledgements
 
