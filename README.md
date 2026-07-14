@@ -1,12 +1,14 @@
-# backgammon-2026
+# Backgammon-NN
 
-A backgammon engine with a self-taught neural-network evaluator and a desktop
-GUI. The engine core is Rust (fast, validated move generation); training is
-PyTorch (TD/Monte-Carlo self-play); inference runs natively in Rust via ONNX;
-and the GUI is PySide6.
+A self-learning backgammon engine with a neural-network evaluator. The engine
+core is Rust (fast, validated move generation); training is PyTorch
+(TD/Monte-Carlo self-play); inference runs natively in Rust via ONNX; and there
+are two ways to play — a PySide6 **desktop app** and a **text-only console app**.
 
 The trained net **beats the hand-crafted evaluator ~84%** and learned entirely
-from self-play, starting from random weights.
+from self-play, starting from random weights. It's a full toolkit: extend the
+training to grow stronger nets, build new networks, run automatic engine-vs-engine
+matches (against other engines or itself), and play the result on your PC.
 
 ## Architecture
 
@@ -53,8 +55,11 @@ cd crates/bgpy && ../../.venv/Scripts/maturin develop --release && cd ../..
 ## Run
 
 ```bash
-# Play against the trained net (GUI)
+# Play against the trained net — desktop app
 .venv/Scripts/python gui/app.py
+
+# Play against the trained net — text-only console app
+.venv/Scripts/python trainer/console_play.py
 
 # Train from self-play
 .venv/Scripts/python trainer/train.py --iters 200 --games 40 --lam 1.0
