@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bgcore
-from engine_api import HceEngine, NeuralEngine, RandomEngine, format_steps
+from engine_api import HceEngine, NeuralEngine, RandomEngine, RolloutEngine, format_steps
 
 MODEL = Path(__file__).resolve().parent.parent / "models" / "td_latest.pt"
 
@@ -59,6 +59,8 @@ def human_move(board, d1, d2):
 
 
 def make_engine(name, ply):
+    if name == "rollout":
+        return RolloutEngine(MODEL.parent / "td.onnx", trials=120, truncate_plies=8, candidates=4)
     if name == "neural" and MODEL.exists():
         return NeuralEngine(MODEL, lookahead=ply)
     if name == "random":
@@ -68,7 +70,7 @@ def make_engine(name, ply):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--opponent", choices=["neural", "hce", "random"], default="neural")
+    ap.add_argument("--opponent", choices=["neural", "rollout", "hce", "random"], default="neural")
     ap.add_argument("--ply", type=int, default=0, help="engine search depth (neural)")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--demo", action="store_true", help="auto-play both sides")

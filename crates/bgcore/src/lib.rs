@@ -31,5 +31,5 @@ pub use game::{
     play_game, result, run_match, Engine, EvalEngine, GameOutcome, GameResult, MatchStats,
 };
 pub use moves::{genmoves, next_submoves, Move, Step, SubMove, BAR, OFF};
-pub use rollout::{rollout_equity, RolloutConfig, RolloutEngine};
+pub use rollout::{rollout_best, rollout_equity, RolloutConfig, RolloutEngine};
 pub use search::{position_value, SearchEngine};

@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 
 import bgcore
 from cube import should_double, should_take
-from engine_api import HceEngine, NeuralEngine, RandomEngine, format_steps
+from engine_api import HceEngine, NeuralEngine, RandomEngine, RolloutEngine, format_steps
 from sounds import Sfx
 
 BAR, OFF = bgcore.BAR, bgcore.OFF
@@ -289,16 +289,12 @@ class BoardView(QWidget):
                 p.setPen(QPen(SRC_RING, 3))
                 p.drawRoundedRect(QRectF(x0 - 6, y - 6, total + 12, s + 12), 9, 9)
             return
-        if self.wink_dice:                     # your turn to roll — pulse a "roll" prompt
+        if self.wink_dice:                     # first roll (no previous) — faint, static placeholder
             total = 2 * s + gap
             x = g["W"] * 0.70 - total / 2
             for _ in range(2):
-                if self.wink_on:
-                    p.setBrush(QBrush(QColor("#fafafa")))
-                    p.setPen(QPen(SRC_RING, 3))
-                else:
-                    p.setBrush(QBrush(QColor(250, 250, 250, 45)))
-                    p.setPen(QPen(QColor(255, 210, 31, 70), 2))
+                p.setBrush(QBrush(QColor(250, 250, 250, 40)))
+                p.setPen(QPen(QColor(255, 210, 31, 90), 2))
                 p.drawRoundedRect(QRectF(x, y, s, s), 6, 6)
                 x += s + gap
 
@@ -404,6 +400,13 @@ class MainWindow(QMainWindow):
             for e in (neural0, neural1, neural2):
                 self.opponents[e.name] = e
             self.evaluator = neural0
+        onnx_path = ROOT / "models" / "td.onnx"
+        self._cube_ro = None
+        if hasattr(bgcore, "Rollouts") and onnx_path.exists():
+            ro = RolloutEngine(onnx_path, trials=180, truncate_plies=9, candidates=5)
+            self.opponents[ro.name] = ro
+            # A dedicated rollout evaluator for cube decisions (no candidate filter).
+            self._cube_ro = bgcore.Rollouts(str(onnx_path), 150, 9, 0, 7)
         self.opponents["HCE (heuristic)"] = HceEngine()
         self.opponents["Random"] = RandomEngine()
         self.hint_engine = neural1 or self.opponents["HCE (heuristic)"]
@@ -481,6 +484,12 @@ class MainWindow(QMainWindow):
             return self.evaluator.static_equity(board)
         return bgcore.hce_equity(board)
 
+    def _cube_eval(self, board):
+        """Equity for cube decisions — rollout-based when available, else static."""
+        if self._cube_ro is not None:
+            return self._cube_ro.equity(board)
+        return self._pos_eval(board)
+
     def _win_prob(self):
         """Your (bottom side's) win probability for the eval bar."""
         disp = self.board if self.human_turn else self.board.swap_perspective()
@@ -501,10 +510,8 @@ class MainWindow(QMainWindow):
                      and not self.busy and not self.pending_double and not self.opening)
         if self.remaining:
             self.view.dice = list(self.remaining)
-        elif roll_time:
-            self.view.dice = []          # clear stale dice so the roll prompt shows
         else:
-            self.view.dice = list(self.roll)
+            self.view.dice = list(self.roll)   # roll-time keeps the previous roll (it winks)
         self.view.carrying = self.carrying
         self.view.source_points = (
             {s[0] for s in self.subs} if (self.human_turn and self.remaining) else set())
@@ -700,7 +707,7 @@ class MainWindow(QMainWindow):
                 and not self.busy and not self.pending_double and not self.opening
                 and self.may_double(0)):
             return
-        eq = self._pos_eval(self.board)  # you are on roll; your equity
+        eq = self._cube_eval(self.board)  # your equity (rollout-based when available)
         if should_take(eq):
             self.cube_value *= 2
             self.cube_owner = 1  # engine owns the cube now
@@ -737,7 +744,7 @@ class MainWindow(QMainWindow):
         if self.game_over:
             return
         if self.may_double(1):
-            eq = self._pos_eval(self.board)  # engine on roll; its equity
+            eq = self._cube_eval(self.board)  # engine equity (rollout-based when available)
             if should_double(eq, True):
                 self.pending_double = True
                 self.busy = True

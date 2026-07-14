@@ -74,6 +74,27 @@ class HceEngine(BaseEngine):
         return scored
 
 
+class RolloutEngine(BaseEngine):
+    """Native parallel Monte-Carlo rollouts (via the Rust `bgcore.Rollouts`,
+    which needs the onnx-feature bindings). Strong but heavy — a second or so per
+    move at these settings."""
+
+    def __init__(self, onnx_path, trials=80, truncate_plies=6, candidates=3, seed=1):
+        self._ro = bgcore.Rollouts(str(onnx_path), trials, truncate_plies, candidates, seed)
+        self.name = f"Rollout ({trials}×{truncate_plies})"
+
+    def analyze(self, board, d1, d2):
+        chosen = self._ro.best_move(board, d1, d2)
+        steps = next(
+            (s for s, r in bgcore.legal_moves_with_steps(board, d1, d2) if r == chosen), []
+        )
+        pts = chosen.winner_points()
+        eq = float(pts) if (pts is not None and pts > 0) else -self._ro.equity(
+            chosen.swap_perspective()
+        )
+        return [(steps, chosen, eq)]
+
+
 class NeuralEngine(BaseEngine):
     """Neural evaluator with optional 1-ply search.
 

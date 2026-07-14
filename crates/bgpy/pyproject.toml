@@ -13,4 +13,6 @@ classifiers = [
 dynamic = ["version"]
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+# `onnx` bundles the native rollout engine (tract). Heavier build, but the
+# Rollouts class and rollout opponent then work out of the box.
+features = ["pyo3/extension-module", "onnx"]

@@ -10,6 +10,10 @@ description = "Python (PyO3) bindings for the bgcore backgammon engine."
 name = "bgcore"
 crate-type = ["cdylib"]
 
+[features]
+# Expose the tract-onnx rollout engine (Rollouts class). Heavier build.
+onnx = ["bgengine/onnx"]
+
 [dependencies]
 # Imported as `bgengine` so the crate name doesn't clash with the `bgcore`
 # Python module defined by `#[pymodule]`.

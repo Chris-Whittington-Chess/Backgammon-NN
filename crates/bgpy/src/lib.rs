@@ -219,8 +219,50 @@ fn hce_move(board: &PyBoard, d1: u8, d2: u8) -> PyBoard {
     PyBoard { inner: mv.result }
 }
 
+/// Parallel Monte-Carlo rollout engine (requires the `onnx` build feature).
+/// Loads an exported ONNX net once and rolls out positions natively in Rust.
+#[cfg(feature = "onnx")]
+#[pyclass]
+struct Rollouts {
+    nn: bgengine::eval::NnEval,
+    cfg: bgengine::RolloutConfig,
+}
+
+#[cfg(feature = "onnx")]
+#[pymethods]
+impl Rollouts {
+    #[new]
+    #[pyo3(signature = (onnx_path, trials = 180, truncate_plies = 11, candidates = 6, seed = 0x5EED))]
+    fn new(
+        onnx_path: &str,
+        trials: usize,
+        truncate_plies: usize,
+        candidates: usize,
+        seed: u64,
+    ) -> PyResult<Self> {
+        let nn = bgengine::eval::NnEval::from_path(onnx_path).map_err(PyValueError::new_err)?;
+        Ok(Rollouts {
+            nn,
+            cfg: bgengine::RolloutConfig { trials, truncate_plies, candidates, seed },
+        })
+    }
+
+    /// Rollout equity for the side to move at `board`.
+    fn equity(&self, board: &PyBoard) -> f32 {
+        bgengine::rollout_equity(&board.inner, &self.nn, &self.cfg)
+    }
+
+    /// The move (resulting board) the rollout engine plays for dice `d1, d2`.
+    fn best_move(&self, board: &PyBoard, d1: u8, d2: u8) -> PyBoard {
+        let mv = bgengine::rollout_best(&board.inner, &Dice::new(d1, d2), &self.nn, &self.cfg);
+        PyBoard { inner: mv.result }
+    }
+}
+
 #[pymodule]
 fn bgcore(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(feature = "onnx")]
+    m.add_class::<Rollouts>()?;
     m.add_class::<PyBoard>()?;
     m.add_function(wrap_pyfunction!(legal_moves, m)?)?;
     m.add_function(wrap_pyfunction!(children_features, m)?)?;

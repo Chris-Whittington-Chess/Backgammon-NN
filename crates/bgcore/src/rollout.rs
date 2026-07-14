@@ -106,6 +106,41 @@ pub fn rollout_equity<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &Rollou
     sum / cfg.trials as f32
 }
 
+/// Pick the best move by rolling out the top candidates (with common random
+/// numbers) and choosing the highest rollout equity.
+pub fn rollout_best<E: Evaluator + Sync>(
+    board: &Board,
+    dice: &Dice,
+    eval: &E,
+    cfg: &RolloutConfig,
+) -> Move {
+    let mut moves = genmoves(board, dice);
+
+    let mut order: Vec<usize> = (0..moves.len()).collect();
+    if cfg.candidates > 0 && moves.len() > cfg.candidates {
+        order.sort_by(|&i, &j| {
+            shallow(&moves[j].result, eval)
+                .partial_cmp(&shallow(&moves[i].result, eval))
+                .unwrap()
+        });
+        order.truncate(cfg.candidates);
+    }
+
+    let mut best_i = order[0];
+    let mut best = f32::NEG_INFINITY;
+    for &i in &order {
+        let s = match result(&moves[i].result) {
+            GameResult::MoverWins(p) => p as f32,
+            _ => -rollout_equity(&moves[i].result.swap_perspective(), eval, cfg),
+        };
+        if s > best {
+            best = s;
+            best_i = i;
+        }
+    }
+    moves.swap_remove(best_i)
+}
+
 /// An [`Engine`] that picks its move by rolling out the top candidates and
 /// choosing the highest rollout equity. Far stronger than static/1-ply play,
 /// and much heavier — meant for strong play and for labelling training data.
@@ -123,33 +158,7 @@ impl<E: Evaluator + Sync> RolloutEngine<E> {
 
 impl<E: Evaluator + Sync> Engine for RolloutEngine<E> {
     fn choose(&mut self, board: &Board, dice: &Dice) -> Move {
-        let mut moves = genmoves(board, dice);
-
-        // Roll out only the most promising moves (by 0-ply).
-        let mut order: Vec<usize> = (0..moves.len()).collect();
-        if self.cfg.candidates > 0 && moves.len() > self.cfg.candidates {
-            order.sort_by(|&i, &j| {
-                shallow(&moves[j].result, &self.eval)
-                    .partial_cmp(&shallow(&moves[i].result, &self.eval))
-                    .unwrap()
-            });
-            order.truncate(self.cfg.candidates);
-        }
-
-        let mut best_i = order[0];
-        let mut best = f32::NEG_INFINITY;
-        for &i in &order {
-            // Common random numbers: same cfg.seed for every candidate.
-            let s = match result(&moves[i].result) {
-                GameResult::MoverWins(p) => p as f32,
-                _ => -rollout_equity(&moves[i].result.swap_perspective(), &self.eval, &self.cfg),
-            };
-            if s > best {
-                best = s;
-                best_i = i;
-            }
-        }
-        moves.swap_remove(best_i)
+        rollout_best(board, dice, &self.eval, &self.cfg)
     }
 
     fn name(&self) -> &str {
