@@ -13,13 +13,14 @@
 //!
 //! Run:  cargo run --release --manifest-path tools/wildbg-bench/Cargo.toml -- [pairs] [trials]
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bgcore::board::{MOVER, NUM_POINTS, OPP};
 use bgcore::eval::{Evaluator as BgEvaluator, NnEval, Value};
 use bgcore::{result, Board, Engine, EvalEngine, GameResult, RolloutConfig, RolloutEngine, Rng};
 use engine::composite::CompositeEvaluator;
-use engine::evaluator::Evaluator as WildbgEvaluator;
+use engine::evaluator::{BatchEvaluator, Evaluator as WildbgEvaluator};
 use engine::position::{Position as WPos, O_BAR, X_BAR};
 
 /// Convert our mover-relative board to a wildbg `Position` (same orientation).
@@ -38,16 +39,35 @@ fn to_wildbg(b: &Board) -> WPos {
 /// `Value` is the nested form, so we accumulate.
 struct WildbgAdapter(CompositeEvaluator);
 
+fn prob_to_value(p: &engine::probabilities::Probabilities) -> Value {
+    Value {
+        win: p.win_normal + p.win_gammon + p.win_bg,
+        win_g: p.win_gammon + p.win_bg,
+        win_bg: p.win_bg,
+        lose_g: p.lose_gammon + p.lose_bg,
+        lose_bg: p.lose_bg,
+    }
+}
+
 impl BgEvaluator for WildbgAdapter {
     fn evaluate(&self, board: &Board) -> Value {
-        let p = self.0.eval(&to_wildbg(board));
-        Value {
-            win: p.win_normal + p.win_gammon + p.win_bg,
-            win_g: p.win_gammon + p.win_bg,
-            win_bg: p.win_bg,
-            lose_g: p.lose_gammon + p.lose_bg,
-            lose_bg: p.lose_bg,
+        prob_to_value(&self.0.eval(&to_wildbg(board)))
+    }
+
+    /// Batched to match our engine's batched path, so the equal-time duel is
+    /// fair. `eval_positions` regroups by phase, so we match results by position.
+    fn evaluate_batch(&self, boards: &[Board]) -> Vec<Value> {
+        if boards.is_empty() {
+            return Vec::new();
         }
+        let positions: Vec<WPos> = boards.iter().map(to_wildbg).collect();
+        let scored: HashMap<String, Value> = self
+            .0
+            .eval_positions(positions.clone())
+            .iter()
+            .map(|(pos, p)| (pos.position_id(), prob_to_value(p)))
+            .collect();
+        positions.iter().map(|p| scored[&p.position_id()]).collect()
     }
 }
 
