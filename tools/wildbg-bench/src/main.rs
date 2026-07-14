@@ -140,9 +140,18 @@ fn main() {
     let mut wild0 = EvalEngine::new(wildbg_adapter(), "wildbg");
     duel("1-ply eval", &mut ours0, &mut wild0, pairs * 3);
 
-    // Rollout: identical fixed-trial truncated rollout for both — eval + search.
+    // Rollout, equal SEARCH EFFORT: identical fixed-trial count for both.
     let cfg = RolloutConfig { trials, truncate_plies: 9, candidates: 5, ..Default::default() };
     let mut oursr = RolloutEngine::new(our_net(), cfg.clone(), "ours");
     let mut wildr = RolloutEngine::new(wildbg_adapter(), cfg, "wildbg");
     duel(&format!("rollout x{trials}"), &mut oursr, &mut wildr, pairs);
+
+    // Rollout, equal WALL-CLOCK: each side gets the same movetime per move, so
+    // our cheaper eval simply does more trials. This is the fair "equal thinking
+    // time" fight.
+    let mt: u64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+    let cfg_t = RolloutConfig { movetime_ms: mt, truncate_plies: 9, candidates: 5, ..Default::default() };
+    let mut ourst = RolloutEngine::new(our_net(), cfg_t.clone(), "ours");
+    let mut wildt = RolloutEngine::new(wildbg_adapter(), cfg_t, "wildbg");
+    duel(&format!("rollout {mt}ms"), &mut ourst, &mut wildt, pairs);
 }
