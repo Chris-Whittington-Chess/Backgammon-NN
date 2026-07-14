@@ -133,6 +133,33 @@ class NeuralEngine(BaseEngine):
             total += w * best
         return total
 
+    # Candidate limits for 2-ply search (root / opponent node) — keep it usable.
+    ROOT_CAND = 4
+    OPP_CAND = 3
+
+    def _two_ply_value(self, board):
+        """Expected equity for the side to move at `board`, searched 2-ply with
+        candidate pruning at the opponent node (matches the Rust pruned search)."""
+        total = 0.0
+        for a, c, w in ALL21:
+            children = bgcore.legal_moves(board, a, c)
+            eq0 = self._static_equity_batch(bgcore.next_state_features(board, a, c))
+            vals0 = []
+            for i, ch in enumerate(children):
+                pts = ch.winner_points()
+                vals0.append(float(pts) if (pts is not None and pts > 0) else -float(eq0[i]))
+            order = sorted(range(len(children)), key=lambda i: -vals0[i])[: self.OPP_CAND]
+            best = None
+            for i in order:
+                ch = children[i]
+                pts = ch.winner_points()
+                v = float(pts) if (pts is not None and pts > 0) else -self._one_ply_value(
+                    ch.swap_perspective())
+                if best is None or v > best:
+                    best = v
+            total += w * best
+        return total
+
     def analyze(self, board, d1, d2):
         moves = bgcore.legal_moves_with_steps(board, d1, d2)
         scored = []
@@ -142,14 +169,28 @@ class NeuralEngine(BaseEngine):
                 pts = result.winner_points()
                 eq = float(pts) if (pts is not None and pts > 0) else -float(opp_eq[i])
                 scored.append((steps, result, eq))
-        else:
+        elif self.lookahead == 1:
             for steps, result in moves:
                 pts = result.winner_points()
-                eq = (
-                    float(pts)
-                    if (pts is not None and pts > 0)
-                    else -self._one_ply_value(result.swap_perspective())
-                )
+                eq = (float(pts) if (pts is not None and pts > 0)
+                      else -self._one_ply_value(result.swap_perspective()))
+                scored.append((steps, result, eq))
+        else:  # 2-ply with root candidate pruning
+            opp_eq = self._static_equity_batch(bgcore.next_state_features(board, d1, d2))
+            base = []
+            for i, (steps, result) in enumerate(moves):
+                pts = result.winner_points()
+                v0 = float(pts) if (pts is not None and pts > 0) else -float(opp_eq[i])
+                base.append(v0)
+            top = set(sorted(range(len(moves)), key=lambda i: -base[i])[: self.ROOT_CAND])
+            for i, (steps, result) in enumerate(moves):
+                pts = result.winner_points()
+                if pts is not None and pts > 0:
+                    eq = float(pts)
+                elif i in top:
+                    eq = -self._two_ply_value(result.swap_perspective())
+                else:
+                    eq = base[i]  # shallow value; won't be the best anyway
                 scored.append((steps, result, eq))
         scored.sort(key=lambda t: -t[2])
         return scored

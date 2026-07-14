@@ -1,0 +1,72 @@
+"""Plot an estimated Elo ladder for the engines (SPEC §13).
+
+Elo is derived by chaining measured head-to-head win rates, anchoring Random at
+0. Each rung uses one real match result:
+    Random -> HCE   : HCE wins 99.5%
+    HCE    -> NN     : NN wins 81.1% (0-ply)
+    NN0    -> NN1    : 1-ply wins 62.5% over 0-ply
+    NN1    -> NN2    : 2-ply wins <benchmark> over 1-ply
+
+Backgammon win rates compress toward 50% because of dice luck, so these Elo gaps
+are approximate; the points-per-game gaps are larger (NN averages ~+1.4 ppg vs
+HCE). Run: .venv/Scripts/python trainer/plot_elo.py [out.png]
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("elo.png")
+
+
+def elo_gap(win_rate: float) -> float:
+    """Elo difference implied by a head-to-head win rate."""
+    win_rate = min(max(win_rate, 1e-4), 1 - 1e-4)
+    return 400.0 * math.log10(win_rate / (1.0 - win_rate))
+
+
+# Measured head-to-head win rates (winner listed first).
+HCE_VS_RANDOM = 0.995
+NN0_VS_HCE = 0.811
+NN1_VS_NN0 = 0.625
+NN2_VS_NN1 = 0.583  # 60 games, ±12.5 — point estimate, wide interval
+
+random_elo = 0.0
+hce_elo = random_elo + elo_gap(HCE_VS_RANDOM)
+nn0_elo = hce_elo + elo_gap(NN0_VS_HCE)
+nn1_elo = nn0_elo + elo_gap(NN1_VS_NN0)
+nn2_elo = nn1_elo + elo_gap(NN2_VS_NN1)
+
+labels = ["Random", "HCE", "NN-600\n(0-ply)", "NN-600\n(1-ply)", "NN-600\n(2-ply)"]
+elos = [random_elo, hce_elo, nn0_elo, nn1_elo, nn2_elo]
+colors = ["#8a8f98", "#d08a34", "#2f6f8f", "#2f8f77", "#2f8f4f"]
+
+for name, e in zip(("Random", "HCE", "NN0", "NN1", "NN2"), elos):
+    print(f"{name:8s} {e:7.0f}")
+
+fig, ax = plt.subplots(figsize=(8.4, 5.0), dpi=130)
+bars = ax.bar(labels, elos, color=colors, width=0.62, edgecolor="white", linewidth=0.6)
+for b, e in zip(bars, elos):
+    ax.text(b.get_x() + b.get_width() / 2, e + 18, f"{e:.0f}",
+            ha="center", va="bottom", fontsize=11, fontweight="bold", color="#222")
+
+ax.set_ylabel("Estimated Elo  (Random = 0)", fontsize=11)
+ax.set_title("Backgammon engine strength ladder", fontsize=14, fontweight="bold", pad=14)
+ax.text(0.5, 1.005,
+        "Chained from head-to-head win rates · dice luck compresses win% so gaps are approximate",
+        transform=ax.transAxes, ha="center", va="bottom", fontsize=9, color="#666")
+ax.set_ylim(0, max(elos) * 1.16)
+ax.grid(axis="y", alpha=0.25)
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+ax.margins(x=0.02)
+fig.tight_layout()
+fig.savefig(OUT, bbox_inches="tight")
+print("saved", OUT)

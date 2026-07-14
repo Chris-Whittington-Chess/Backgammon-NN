@@ -1,8 +1,4 @@
-"""Headless smoke test + screenshot generator for the GUI (offscreen Qt).
-
-Drives the game by pumping the animation timers manually (there is no event
-loop offscreen), exercising roll -> human submoves -> animated engine reply.
-"""
+"""Headless smoke test + screenshot generator for the GUI (offscreen Qt)."""
 import os
 import sys
 from pathlib import Path
@@ -22,21 +18,27 @@ def grab(win, name):
     print("saved", name)
 
 
-def pump_roll(win):
-    win.on_dice()
-    win._roll_timer.stop()
-    win._roll_frames = 1
-    win._roll_frame()
-
-
-def pump_engine(win):
-    win.view.grab()          # force a paint so board geometry exists
-    win.engine_move()
-    guard = 0
-    while win._anim_timer.isActive():
-        win._anim_frame()
-        guard += 1
-        assert guard < 2000, "engine animation runaway"
+def play_turns(win, n):
+    for _ in range(n):
+        if win.game_over:
+            break
+        win.on_dice()
+        win._roll_timer.stop()
+        win._roll_frames = 1
+        win._roll_frame()
+        g = 0
+        while win.human_turn and win.remaining and win.subs and not win.game_over:
+            win.apply_submove(win.subs[0])
+            g += 1
+            assert g < 12
+        if not win.human_turn and not win.game_over:
+            win.view.grab()
+            win.engine_play()   # skip the double check for a fast deterministic smoke
+            gg = 0
+            while win._anim_timer.isActive():
+                win._anim_frame()
+                gg += 1
+                assert gg < 2000
 
 
 def main():
@@ -44,31 +46,37 @@ def main():
     win = gui.MainWindow()
     win.resize(1080, 700)
     win.show()
-    grab(win, "board_start.png")
+    grab(win, "board_start.png")           # centered cube shows "1"
 
-    win.opp_box.setCurrentText("Random")   # fast opponent for the smoke test
+    win.opp_box.setCurrentText("Random")
     win.rng.seed(11)
-
-    for turn in range(4):
-        if win.game_over:
-            break
-        pump_roll(win)
-        guard = 0
-        while win.human_turn and win.remaining and win.subs and not win.game_over:
-            win.apply_submove(win.subs[0])
-            guard += 1
-            assert guard < 12
-        if win.human_turn and not win.remaining is None and not win.subs and not win.game_over:
-            # dance (no legal move): the singleShot won't fire headless
-            if win.human_turn and not win.game_over and not win.remaining == []:
-                pass
-        if not win.human_turn and not win.game_over:
-            pump_engine(win)
-        print(f"turn {turn}: moves logged = {win.moves.count()}, status = {win.status.text()!r}")
-
+    play_turns(win, 4)
     grab(win, "board_features.png")
-    print("OK: no crashes;", "game over" if win.game_over else "in progress",
-          "| move panel entries:", win.moves.count())
+    print("after play: moves", win.moves.count(), "| status", repr(win.status.text()))
+
+    # --- doubling cube mechanics ---
+    win.new_game()
+    win.on_double()                        # you offer; engine takes or drops
+    assert win.cube_value == 2 or win.game_over, "double had no effect"
+    print("human double ->", "cube", win.cube_value, "owner", win.cube_owner,
+          "over", win.game_over, "score", win.score)
+
+    win.new_game()
+    win.pending_double = True
+    win.busy = True
+    win.on_take()
+    assert win.cube_value == 2 and win.cube_owner == 0 and not win.pending_double
+    print("take -> cube", win.cube_value, "owner", win.cube_owner)
+
+    win.new_game()
+    win.pending_double = True
+    before = list(win.score)
+    win.on_drop()
+    assert win.game_over and win.score[1] == before[1] + 1
+    print("drop -> engine +1, score", win.score)
+
+    grab(win, "board_cube.png")
+    print("OK: no crashes")
 
 
 if __name__ == "__main__":

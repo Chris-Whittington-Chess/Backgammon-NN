@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 import bgcore
+from cube import should_double, should_take
 from engine_api import HceEngine, NeuralEngine, RandomEngine, format_steps
 from sounds import Sfx
 
@@ -67,6 +68,8 @@ class BoardView(QWidget):
         self.dest_points: set[int] = set()
         self.carrying: int | None = None       # point picked up (drawn short)
         self.floating: tuple[float, float, bool] | None = None  # (x, y, human?)
+        self.cube_value = 1
+        self.cube_owner: int | None = None     # None centered, 0 you, 1 engine
         self._geom = None
 
     # --- geometry ---
@@ -148,6 +151,7 @@ class BoardView(QWidget):
         self._draw_checkers(p, g)
         self._draw_bar(p, g)
         self._draw_off(p, g)
+        self._draw_cube(p, g)
         self._draw_dice(p, g)
         self._draw_pips(p, g)
         if self.floating:
@@ -212,6 +216,22 @@ class BoardView(QWidget):
             p.setBrush(QBrush(DEST_FILL))
             p.setPen(Qt.NoPen)
             p.drawRect(QRectF(ox0, g["H"] / 2, ox1 - ox0, g["H"] / 2 - g["margin"]))
+
+    def _draw_cube(self, p, g):
+        r = g["r"] * 1.4
+        x = g["margin"] + g["pw"] * 0.5
+        if self.cube_owner == 1:      # engine owns -> top
+            y = g["margin"] + g["ph"] + r + 6
+        elif self.cube_owner == 0:    # you own -> bottom
+            y = g["H"] - g["margin"] - g["ph"] - r - 6
+        else:                          # centered
+            y = g["H"] / 2
+        p.setBrush(QBrush(QColor("#f5f0e1")))
+        p.setPen(QPen(QColor("#2b2b2b"), 2))
+        p.drawRoundedRect(QRectF(x - r, y - r, 2 * r, 2 * r), 6, 6)
+        p.setPen(QPen(QColor("#222")))
+        p.setFont(QFont("Arial", int(r * 0.85), QFont.Bold))
+        p.drawText(QRectF(x - r, y - r, 2 * r, 2 * r), Qt.AlignCenter, str(self.cube_value))
 
     def _pip_face(self, p, x, y, s, value):
         p.setBrush(QBrush(QColor("#fafafa")))
@@ -295,8 +315,9 @@ class MainWindow(QMainWindow):
         if ckpt.exists():
             neural0 = NeuralEngine(ckpt, lookahead=0)
             neural1 = NeuralEngine(ckpt, lookahead=1, share=neural0)
-            self.opponents[neural0.name] = neural0
-            self.opponents[neural1.name] = neural1
+            neural2 = NeuralEngine(ckpt, lookahead=2, share=neural0)
+            for e in (neural0, neural1, neural2):
+                self.opponents[e.name] = e
             self.evaluator = neural0
         self.opponents["HCE (heuristic)"] = HceEngine()
         self.opponents["Random"] = RandomEngine()
@@ -304,6 +325,9 @@ class MainWindow(QMainWindow):
 
         self.view = BoardView(self.on_click, self.on_move, self.on_dice)
         self.roll_btn = QPushButton("Roll")
+        self.double_btn = QPushButton("Double")
+        self.take_btn = QPushButton("Take")
+        self.drop_btn = QPushButton("Drop")
         self.hint_btn = QPushButton("Hint")
         self.new_btn = QPushButton("New Game")
         self.opp_box = QComboBox()
@@ -311,13 +335,23 @@ class MainWindow(QMainWindow):
         if self.hint_engine in self.opponents.values():
             self.opp_box.setCurrentText(self.hint_engine.name)
         self.roll_btn.clicked.connect(self.on_dice)
+        self.double_btn.clicked.connect(self.on_double)
+        self.take_btn.clicked.connect(self.on_take)
+        self.drop_btn.clicked.connect(self.on_drop)
         self.hint_btn.clicked.connect(self.on_hint)
         self.new_btn.clicked.connect(self.new_game)
+        self.take_btn.setVisible(False)
+        self.drop_btn.setVisible(False)
+
+        self.score_label = QLabel("You 0 — 0 Engine")
+        self.score_label.setStyleSheet("font-weight:bold; padding:0 8px;")
 
         controls = QHBoxLayout()
-        for w in (self.roll_btn, self.hint_btn, self.new_btn, QLabel("Opponent:"), self.opp_box):
+        for w in (self.roll_btn, self.double_btn, self.take_btn, self.drop_btn,
+                  self.hint_btn, self.new_btn, QLabel("Opponent:"), self.opp_box):
             controls.addWidget(w)
         controls.addStretch(1)
+        controls.addWidget(self.score_label)
 
         self.moves = QListWidget()
         self.moves.setFixedWidth(230)
@@ -343,6 +377,8 @@ class MainWindow(QMainWindow):
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._anim_frame)
         self.busy = False
+        self.score = [0, 0]          # cumulative points [you, engine]
+        self.pending_double = False  # engine offered a double, awaiting take/drop
         self.new_game()
 
     @property
@@ -367,12 +403,18 @@ class MainWindow(QMainWindow):
             {s[1] for s in self.subs if s[0] == self.carrying} if self.carrying is not None else set())
         if self.carrying is None:
             self.view.floating = None
+        self.view.cube_value = self.cube_value
+        self.view.cube_owner = self.cube_owner
         if message is not None:
             self.status.setText(message)
         ready = self.human_turn and not self.remaining and not self.game_over and not self.busy
-        self.roll_btn.setEnabled(ready)
+        self.roll_btn.setEnabled(ready and not self.pending_double)
+        self.double_btn.setEnabled(ready and not self.pending_double and self.may_double(0))
+        self.take_btn.setVisible(self.pending_double)
+        self.drop_btn.setVisible(self.pending_double)
         self.hint_btn.setEnabled(
             self.human_turn and bool(self.remaining) and self.full_roll and not self.game_over)
+        self.score_label.setText(f"You {self.score[0]} — {self.score[1]} Engine")
         self.view.update()
 
     # --- game flow ---
@@ -391,7 +433,16 @@ class MainWindow(QMainWindow):
         self.human_steps = []
         self.moves.clear()
         self.turn_no = 1
+        self.cube_value = 1
+        self.cube_owner = None       # None = centered, 0 = you, 1 = engine
+        self.pending_double = False
+        self.take_btn.setVisible(False)
+        self.drop_btn.setVisible(False)
         self.refresh(f"New game vs {self.opp_box.currentText()}. Click the dice to roll.")
+
+    def may_double(self, side):
+        return (not self.game_over and self.cube_value < 64
+                and self.cube_owner in (None, side))
 
     def on_dice(self):
         if not (self.human_turn and not self.remaining and not self.game_over and not self.busy):
@@ -475,9 +526,8 @@ class MainWindow(QMainWindow):
         self.sfx.play_place()
         pts = self.board.winner_points()
         if pts is not None and pts > 0:
-            self.game_over = True
             self._log_move("You", self.roll, self.human_steps, float(pts))
-            self.refresh(f"You win {self._pts_name(pts)}! New Game to play again.")
+            self._end_game(0, self.cube_value * pts, f"You win {self._pts_name(pts)}")
             return
         self.subs = bgcore.submoves(self.board, self.remaining)
         if not self.subs:
@@ -496,11 +546,62 @@ class MainWindow(QMainWindow):
         self.subs = []
         self.busy = True
         self.refresh("Engine thinking…")
-        QTimer.singleShot(350, self.engine_move)
+        QTimer.singleShot(350, self.engine_turn)
 
-    def engine_move(self):
+    # --- doubling cube ---
+    def on_double(self):
+        if not (self.human_turn and not self.remaining and not self.game_over
+                and not self.busy and not self.pending_double and self.may_double(0)):
+            return
+        eq = self._pos_eval(self.board)  # you are on roll; your equity
+        if should_take(eq):
+            self.cube_value *= 2
+            self.cube_owner = 1  # engine owns the cube now
+            self.refresh(f"You double. Engine takes — cube is {self.cube_value}. Roll.")
+        else:
+            self._end_game(0, self.cube_value, "Engine drops")
+
+    def on_take(self):
+        if not self.pending_double:
+            return
+        self.cube_value *= 2
+        self.cube_owner = 0  # you own the cube now
+        self.pending_double = False
+        self.refresh(f"You take — cube is {self.cube_value}. Engine plays…")
+        QTimer.singleShot(300, self.engine_play)
+
+    def on_drop(self):
+        if not self.pending_double:
+            return
+        self.pending_double = False
+        self._end_game(1, self.cube_value, "You drop")
+
+    def _end_game(self, winner, points, reason):
+        self.game_over = True
+        self.busy = False
+        self.pending_double = False
+        self.score[winner] += points
+        who = "You" if winner == 0 else "Engine"
+        self.refresh(f"{reason}. {who} +{points} (score {self.score[0]}-{self.score[1]}). "
+                     f"New Game to continue.")
+
+    def engine_turn(self):
+        """Engine's turn: consider doubling, otherwise roll and play."""
         if self.game_over:
             return
+        if self.may_double(1):
+            eq = self._pos_eval(self.board)  # engine on roll; its equity
+            if should_double(eq, True):
+                self.pending_double = True
+                self.busy = True
+                self.refresh(f"Engine doubles to {self.cube_value * 2}! Take or Drop?")
+                return
+        self.engine_play()
+
+    def engine_play(self):
+        if self.game_over:
+            return
+        self.busy = True
         d1, d2 = self.rng.randint(1, 6), self.rng.randint(1, 6)
         self.roll = (d1, d2)
         nxt, pts, steps, eq = self.opponent.choose(self.board, d1, d2)
@@ -568,10 +669,8 @@ class MainWindow(QMainWindow):
         played = format_steps(steps)
         human_eq = -eq  # eq is engine-perspective; show from your side
         if pts is not None:
-            self.game_over = True
             self._log_move("CPU", (d1, d2), steps, -float(pts))
-            self.busy = False
-            self.refresh(f"Engine rolled {d1}-{d2}: {played}. Engine wins {self._pts_name(pts)}.")
+            self._end_game(1, self.cube_value * pts, f"Engine wins {self._pts_name(pts)}")
             return
         self.board = nxt
         self.human_turn = True

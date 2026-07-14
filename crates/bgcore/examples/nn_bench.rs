@@ -53,6 +53,15 @@ fn main() {
         let mut b = EvalEngine::new(&nn, "NN-0ply");
         let stats = run_match(&mut a, &mut b, 100, 424242);
         let g = 200.0 / t0.elapsed().as_secs_f64();
-        println!("NN(1-ply) vs NN(0-ply)\n  {}  [{g:.0} games/sec]", stats.summary());
+        println!("NN(1-ply) vs NN(0-ply)\n  {}  [{g:.1} games/sec]", stats.summary());
+    }
+    {
+        // Candidate-pruned 2-ply vs 1-ply (same net). Fewer games — 2-ply is slower.
+        let t0 = Instant::now();
+        let mut a = SearchEngine::with_candidates(&nn, 2, 6, "NN-2ply");
+        let mut b = SearchEngine::new(&nn, 1, "NN-1ply");
+        let stats = run_match(&mut a, &mut b, 30, 55555);
+        let g = 60.0 / t0.elapsed().as_secs_f64();
+        println!("NN(2-ply) vs NN(1-ply)\n  {}  [{g:.1} games/sec]", stats.summary());
     }
 }
