@@ -56,12 +56,40 @@ impl Default for RolloutConfig {
 
 const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
 
-/// 0-ply value of a resulting position to the side that just moved.
-fn shallow<E: Evaluator>(r: &Board, eval: &E) -> f32 {
-    match result(r) {
-        GameResult::MoverWins(p) => p as f32,
-        _ => -eval.evaluate(&r.swap_perspective()).equity(),
+/// 0-ply score of every move's resulting position, to the side that just moved
+/// (terminal wins score their points). The non-terminal children are evaluated
+/// in **one batched forward pass** — the rollout hot path, since it runs at every
+/// ply for all legal moves.
+fn shallow_scores<E: Evaluator>(moves: &[Move], eval: &E) -> Vec<f32> {
+    let mut scores = vec![0.0f32; moves.len()];
+    let mut boards = Vec::with_capacity(moves.len());
+    let mut slots = Vec::with_capacity(moves.len());
+    for (i, m) in moves.iter().enumerate() {
+        match result(&m.result) {
+            GameResult::MoverWins(p) => scores[i] = p as f32,
+            _ => {
+                slots.push(i);
+                boards.push(m.result.swap_perspective());
+            }
+        }
     }
+    let vals = eval.evaluate_batch(&boards);
+    for (k, &i) in slots.iter().enumerate() {
+        scores[i] = -vals[k].equity();
+    }
+    scores
+}
+
+fn argmax(scores: &[f32]) -> usize {
+    let mut best_i = 0;
+    let mut best = f32::NEG_INFINITY;
+    for (i, &s) in scores.iter().enumerate() {
+        if s > best {
+            best = s;
+            best_i = i;
+        }
+    }
+    best_i
 }
 
 /// Choose the playout move and return its index into `moves`.
@@ -85,16 +113,7 @@ fn pick_playout<E: Evaluator>(b: &Board, moves: &[Move], eval: &E) -> usize {
         }
         return best_i;
     }
-    let mut best_i = 0;
-    let mut best = f32::NEG_INFINITY;
-    for (i, m) in moves.iter().enumerate() {
-        let s = shallow(&m.result, eval);
-        if s > best {
-            best = s;
-            best_i = i;
-        }
-    }
-    best_i
+    argmax(&shallow_scores(moves, eval))
 }
 
 /// One truncated playout from `board`, returning equity **from the perspective
@@ -192,11 +211,8 @@ pub fn rollout_best_scored<E: Evaluator + Sync>(
 
     let mut order: Vec<usize> = (0..moves.len()).collect();
     if cfg.candidates > 0 && moves.len() > cfg.candidates {
-        order.sort_by(|&i, &j| {
-            shallow(&moves[j].result, eval)
-                .partial_cmp(&shallow(&moves[i].result, eval))
-                .unwrap()
-        });
+        let scores = shallow_scores(&moves, eval);
+        order.sort_by(|&i, &j| scores[j].partial_cmp(&scores[i]).unwrap());
         order.truncate(cfg.candidates);
     }
 

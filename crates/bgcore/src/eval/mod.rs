@@ -56,6 +56,15 @@ impl Value {
 /// Anything that can score a position from the mover's perspective.
 pub trait Evaluator {
     fn evaluate(&self, board: &Board) -> Value;
+
+    /// Evaluate several positions at once. The default loops over
+    /// [`Evaluator::evaluate`]; neural evaluators override it with a single
+    /// batched forward pass (one `[N, 198]` matmul instead of N `[1, 198]`
+    /// ones), which is far more SIMD-efficient — the hot path in rollouts, where
+    /// every ply scores all legal moves.
+    fn evaluate_batch(&self, boards: &[Board]) -> Vec<Value> {
+        boards.iter().map(|b| self.evaluate(b)).collect()
+    }
 }
 
 /// Let a shared reference act as an evaluator, so one (expensive) evaluator such
@@ -63,5 +72,8 @@ pub trait Evaluator {
 impl<T: Evaluator + ?Sized> Evaluator for &T {
     fn evaluate(&self, board: &Board) -> Value {
         (**self).evaluate(board)
+    }
+    fn evaluate_batch(&self, boards: &[Board]) -> Vec<Value> {
+        (**self).evaluate_batch(boards)
     }
 }

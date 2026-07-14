@@ -15,21 +15,27 @@ use tract_onnx::tract_hir::shapefactoid;
 
 type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
 
-/// An [`Evaluator`] backed by an ONNX value network (batch size 1).
+/// An [`Evaluator`] backed by an ONNX value network, optimized for **any** batch
+/// size so many positions can be scored in one forward pass.
 pub struct NnEval {
     model: TractModel,
 }
 
+fn out_to_value(row: &[f32]) -> Value {
+    Value { win: row[0], win_g: row[1], win_bg: row[2], lose_g: row[3], lose_bg: row[4] }
+}
+
 impl NnEval {
     /// Load and optimize an ONNX model from a file path. The model must take a
-    /// `[N, 198]` float input and produce `[N, 5]` probability outputs.
+    /// `[N, 198]` float input and produce `[N, 5]` probability outputs. The batch
+    /// axis is left symbolic so a single optimized plan serves any batch size.
     pub fn from_path(path: &str) -> Result<Self, String> {
-        let model = onnx()
-            .model_for_path(path)
-            .map_err(|e| format!("load {path}: {e}"))?
+        let model = onnx().model_for_path(path).map_err(|e| format!("load {path}: {e}"))?;
+        let batch = model.sym("N");
+        let model = model
             .with_input_fact(
                 0,
-                InferenceFact::dt_shape(f32::datum_type(), shapefactoid![1, (features::NUM_INPUTS)]),
+                InferenceFact::dt_shape(f32::datum_type(), shapefactoid![batch, (features::NUM_INPUTS)]),
             )
             .map_err(|e| format!("input fact: {e}"))?
             .into_optimized()
@@ -41,36 +47,37 @@ impl NnEval {
 
     /// Run the net on a single 198-feature vector, returning the raw 5 outputs.
     pub fn run(&self, feats: &[f32; features::NUM_INPUTS]) -> [f32; 5] {
-        let input = tract_ndarray::Array::from_shape_vec(
-            (1, features::NUM_INPUTS),
-            feats.to_vec(),
-        )
-        .expect("feature shape");
-        let out = self
-            .model
-            .run(tvec!(input.into_tvalue()))
-            .expect("tract inference");
-        let view = out[0].to_array_view::<f32>().expect("f32 output");
-        [
-            view[[0, 0]],
-            view[[0, 1]],
-            view[[0, 2]],
-            view[[0, 3]],
-            view[[0, 4]],
-        ]
+        let out = self.run_batch(feats, 1);
+        [out[0], out[1], out[2], out[3], out[4]]
+    }
+
+    /// Run the net on `n` concatenated 198-feature vectors, returning `n * 5`
+    /// outputs (row-major). One `[n, 198]` matmul instead of `n` `[1, 198]` ones.
+    pub fn run_batch(&self, feats: &[f32], n: usize) -> Vec<f32> {
+        debug_assert_eq!(feats.len(), n * features::NUM_INPUTS);
+        let input =
+            tract_ndarray::Array::from_shape_vec((n, features::NUM_INPUTS), feats.to_vec())
+                .expect("feature shape");
+        let out = self.model.run(tvec!(input.into_tvalue())).expect("tract inference");
+        out[0].to_array_view::<f32>().expect("f32 output").iter().copied().collect()
     }
 }
 
 impl Evaluator for NnEval {
     fn evaluate(&self, board: &Board) -> Value {
-        let o = self.run(&features::encode(board));
-        Value {
-            win: o[0],
-            win_g: o[1],
-            win_bg: o[2],
-            lose_g: o[3],
-            lose_bg: o[4],
+        out_to_value(&self.run(&features::encode(board)))
+    }
+
+    fn evaluate_batch(&self, boards: &[Board]) -> Vec<Value> {
+        if boards.is_empty() {
+            return Vec::new();
         }
+        let mut feats = Vec::with_capacity(boards.len() * features::NUM_INPUTS);
+        for b in boards {
+            feats.extend_from_slice(&features::encode(b));
+        }
+        let out = self.run_batch(&feats, boards.len());
+        out.chunks_exact(5).map(out_to_value).collect()
     }
 }
 
