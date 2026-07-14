@@ -112,12 +112,10 @@ class NeuralEngine(BaseEngine):
             )
             base = share.name.split(" —")[0]
         else:
-            from model import ValueNet, equity
+            from model import net_from_ckpt, equity
 
             ck = torch.load(ckpt_path, map_location="cpu")
-            self.net = ValueNet(ck.get("hidden", 128))
-            self.net.load_state_dict(ck["model"])
-            self.net.eval()
+            self.net = net_from_ckpt(ck)
             self._torch, self._np, self._equity = torch, np, equity
             base = f"Neural (iter {ck.get('iter', '?')})"
 

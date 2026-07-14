@@ -15,20 +15,50 @@ NUM_INPUTS = 198
 NUM_OUTPUTS = 5
 
 
-class ValueNet(nn.Module):
-    """198 -> hidden -> 5 (sigmoid) probability head."""
+class SquaredReLU(nn.Module):
+    """ReLU squared (Primer): ``max(0, x)**2``, written as a Mul so it exports to
+    ONNX ops (`Relu`, `Mul`) that tract supports."""
 
-    def __init__(self, hidden: int = 128):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        r = torch.relu(x)
+        return r * r
+
+
+def _activation(name: str) -> nn.Module:
+    return {"relu": nn.ReLU, "sqrelu": SquaredReLU}[name]()
+
+
+class ValueNet(nn.Module):
+    """198 -> hidden layer(s) -> 5 (sigmoid) probability head.
+
+    `hidden` is an ``int`` for one hidden layer (e.g. ``128``) or a list for a
+    deeper net (e.g. ``[256, 128]``). Layer indices are unchanged for the
+    single-layer ReLU case, so older 198->128->5 checkpoints still load. Widths
+    that are multiples of 8/16/32 (128, 256) also tile cleanly for SIMD.
+    `act` is ``"relu"`` or ``"sqrelu"`` (ReLU squared).
+    """
+
+    def __init__(self, hidden=128, act: str = "relu"):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(NUM_INPUTS, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, NUM_OUTPUTS),
-            nn.Sigmoid(),
-        )
+        sizes = [hidden] if isinstance(hidden, int) else list(hidden)
+        layers = []
+        prev = NUM_INPUTS
+        for h in sizes:
+            layers += [nn.Linear(prev, h), _activation(act)]
+            prev = h
+        layers += [nn.Linear(prev, NUM_OUTPUTS), nn.Sigmoid()]
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+def net_from_ckpt(ck) -> "ValueNet":
+    """Rebuild the exact architecture recorded in a checkpoint dict."""
+    net = ValueNet(ck.get("hidden", 128), ck.get("act", "relu"))
+    net.load_state_dict(ck["model"])
+    net.eval()
+    return net
 
 
 def equity(v: torch.Tensor) -> torch.Tensor:

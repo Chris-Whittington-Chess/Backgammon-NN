@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 import bgcore
-from model import ValueNet
+from model import net_from_ckpt
 
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
@@ -28,11 +28,13 @@ MODELS = ROOT / "models"
 def main():
     ckpt_path = Path(sys.argv[1]) if len(sys.argv) > 1 else MODELS / "td_latest.pt"
     ckpt = torch.load(ckpt_path, map_location="cpu")
-    net = ValueNet(ckpt.get("hidden", 128))
-    net.load_state_dict(ckpt["model"])
-    net.eval()
+    net = net_from_ckpt(ckpt)
 
-    onnx_path = MODELS / "td.onnx"
+    # Second arg overrides the output path (so a candidate net can be exported
+    # without clobbering the live td.onnx). The parity fixture is only rewritten
+    # for the default td.onnx, since the Rust tract test is pinned to it.
+    onnx_path = Path(sys.argv[2]) if len(sys.argv) > 2 else MODELS / "td.onnx"
+    is_default = onnx_path == MODELS / "td.onnx"
     dummy = torch.zeros(1, 198, dtype=torch.float32)
     torch.onnx.export(
         net,
@@ -67,8 +69,9 @@ def main():
         "features": feats,
         "expected_output": start_out,
     }
-    (MODELS / "parity.json").write_text(json.dumps(fixture, indent=2))
-    print(f"wrote parity fixture; start output = {[round(v, 4) for v in start_out]}")
+    if is_default:
+        (MODELS / "parity.json").write_text(json.dumps(fixture, indent=2))
+        print(f"wrote parity fixture; start output = {[round(v, 4) for v in start_out]}")
     print("OK")
 
 

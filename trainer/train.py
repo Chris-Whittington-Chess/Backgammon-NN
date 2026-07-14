@@ -200,7 +200,9 @@ def main():
     ap.add_argument("--games", type=int, default=20, help="self-play games per iter")
     ap.add_argument("--lam", type=float, default=1.0, help="1.0 = Monte-Carlo; <1 can collapse")
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--hidden", type=int, default=128)
+    ap.add_argument("--hidden", type=str, default="128",
+                    help="hidden layer sizes, e.g. 128 or 256,128")
+    ap.add_argument("--act", choices=["relu", "sqrelu"], default="relu")
     ap.add_argument("--bench-every", type=int, default=5)
     ap.add_argument("--bench-games", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
@@ -210,11 +212,13 @@ def main():
 
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
-    net = ValueNet(args.hidden)
+    sizes = [int(x) for x in args.hidden.split(",")]
+    hidden = sizes[0] if len(sizes) == 1 else sizes
+    net = ValueNet(hidden, args.act)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     MODELS_DIR.mkdir(exist_ok=True)
 
-    print(f"TD(lambda={args.lam}) self-play | hidden={args.hidden} lr={args.lr}")
+    print(f"TD(lambda={args.lam}) self-play | hidden={hidden} act={args.act} lr={args.lr}")
     print("Baseline (untrained net):")
     wr, ppg = benchmark(net, random_policy(), args.bench_games, rng)
     print(f"  vs Random: win {100*wr:.1f}%  PPG {ppg:+.3f}")
@@ -234,7 +238,7 @@ def main():
                 f" | vs HCE win {100*wr_h:.1f}% PPG {ppg_h:+.2f}"
             )
             torch.save(
-                {"model": net.state_dict(), "hidden": args.hidden, "iter": it},
+                {"model": net.state_dict(), "hidden": hidden, "act": args.act, "iter": it},
                 MODELS_DIR / args.out,
             )
         print(line)

@@ -33,7 +33,7 @@ import torch.nn.functional as F
 
 import bgcore
 from engine_api import NeuralEngine
-from model import ValueNet, equity as net_equity
+from model import net_from_ckpt, equity as net_equity
 from train import benchmark, hce_policy, net_policy, play_match_game
 
 MODELS = Path(__file__).resolve().parent.parent / "models"
@@ -94,10 +94,7 @@ def head_to_head(net_a, net_b, games, rng):
 
 def load_net(path):
     ck = torch.load(path, map_location="cpu")
-    net = ValueNet(ck.get("hidden", 128))
-    net.load_state_dict(ck["model"])
-    net.eval()
-    return net, ck
+    return net_from_ckpt(ck), ck
 
 
 def main():
