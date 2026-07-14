@@ -36,28 +36,35 @@ def eval_batch(net: ValueNet, feats: list[list[float]]) -> torch.Tensor:
     return net(x)
 
 
-def choose_next(net, board, d1, d2, epsilon, rng):
+def choose_next(net, board, d1, d2, epsilon, rng, race_aware=True):
     """Pick a move by 0-ply negamax on net equity (epsilon-greedy).
 
     Returns (next_board_or_None, terminal_points_or_None). The next board is the
     resulting position with the turn passed (opponent to move); a non-None points
     value means the mover just won that many points and the game is over.
+
+    Once the sides have passed (`race_aware` and no contact), the net is a weak,
+    gammon-inflating guide, so play the correct race move (minimise remaining
+    pips) instead. This keeps the late-game outcomes — and hence the lambda
+    targets that flow back through the whole game — honest.
     """
     children = bgcore.legal_moves(board, d1, d2)  # opponent NOT yet to move
     term_pts = [c.winner_points() for c in children]
 
-    # Value of each child from the opponent's perspective; mover wants to
-    # minimise it, i.e. maximise (-opp_equity). Terminal wins score their points.
-    vals = eval_batch(net, bgcore.next_state_features(board, d1, d2))
-    mover_eq = (-equity(vals)).clone()
-    for i, p in enumerate(term_pts):
-        if p is not None:
-            mover_eq[i] = float(p)
-
-    if rng.random() < epsilon:
-        i = rng.randrange(len(children))
+    if race_aware and board.no_contact():
+        i = min(range(len(children)), key=lambda j: children[j].pip_count(0))
     else:
-        i = int(torch.argmax(mover_eq).item())
+        # Value of each child from the opponent's perspective; mover wants to
+        # minimise it, i.e. maximise (-opp_equity). Terminal wins score points.
+        vals = eval_batch(net, bgcore.next_state_features(board, d1, d2))
+        mover_eq = (-equity(vals)).clone()
+        for i, p in enumerate(term_pts):
+            if p is not None:
+                mover_eq[i] = float(p)
+        if rng.random() < epsilon:
+            i = rng.randrange(len(children))
+        else:
+            i = int(torch.argmax(mover_eq).item())
 
     if term_pts[i] is not None:
         return None, term_pts[i]
@@ -133,7 +140,7 @@ def train_iter(net, opt, games, epsilon, lam, rng, epochs=1, batch=1024):
 
 def net_policy(net):
     def f(board, d1, d2, rng):
-        return choose_next(net, board, d1, d2, 0.0, rng)  # greedy
+        return choose_next(net, board, d1, d2, 0.0, rng)  # greedy, race-aware
 
     return f
 
@@ -191,12 +198,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iters", type=int, default=40)
     ap.add_argument("--games", type=int, default=20, help="self-play games per iter")
-    ap.add_argument("--lam", type=float, default=0.7)
+    ap.add_argument("--lam", type=float, default=1.0, help="1.0 = Monte-Carlo; <1 can collapse")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--hidden", type=int, default=128)
     ap.add_argument("--bench-every", type=int, default=5)
     ap.add_argument("--bench-games", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--out", type=str, default="td_latest.pt",
+                    help="checkpoint filename under models/ (keep the live net safe)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -226,11 +235,11 @@ def main():
             )
             torch.save(
                 {"model": net.state_dict(), "hidden": args.hidden, "iter": it},
-                MODELS_DIR / "td_latest.pt",
+                MODELS_DIR / args.out,
             )
         print(line)
 
-    print(f"\nSaved checkpoint to {MODELS_DIR / 'td_latest.pt'}")
+    print(f"\nSaved checkpoint to {MODELS_DIR / args.out}")
 
 
 if __name__ == "__main__":
