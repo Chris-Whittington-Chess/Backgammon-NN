@@ -82,8 +82,8 @@ fn wildbg_adapter() -> WildbgAdapter {
     )
 }
 
-fn our_net() -> NnEval {
-    NnEval::from_path(&format!("{}/../../models/td.onnx", env!("CARGO_MANIFEST_DIR")))
+fn our_net(onnx: &str) -> NnEval {
+    NnEval::from_path(&format!("{}/../../models/{onnx}", env!("CARGO_MANIFEST_DIR")))
         .expect("load our net")
 }
 
@@ -150,19 +150,21 @@ fn duel(label: &str, a: &mut dyn Engine, b: &mut dyn Engine, pairs: usize) {
 fn main() {
     let pairs: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(50);
     let trials: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(200);
+    let onnx = std::env::args().nth(4).unwrap_or_else(|| "td.onnx".to_string());
+    println!("our net: models/{onnx}");
     println!(
         "Equal-footing: our net vs wildbg's net through the SAME bgcore search.\n\
          (wildbg net = 2 specialised contact/race nets; ours = 1x 198-Tesauro)\n"
     );
 
     // 1-ply: static eval of each move — isolates raw evaluation quality.
-    let mut ours0 = EvalEngine::new(our_net(), "ours");
+    let mut ours0 = EvalEngine::new(our_net(&onnx), "ours");
     let mut wild0 = EvalEngine::new(wildbg_adapter(), "wildbg");
     duel("1-ply eval", &mut ours0, &mut wild0, pairs * 3);
 
     // Rollout, equal SEARCH EFFORT: identical fixed-trial count for both.
     let cfg = RolloutConfig { trials, truncate_plies: 9, candidates: 5, ..Default::default() };
-    let mut oursr = RolloutEngine::new(our_net(), cfg.clone(), "ours");
+    let mut oursr = RolloutEngine::new(our_net(&onnx), cfg.clone(), "ours");
     let mut wildr = RolloutEngine::new(wildbg_adapter(), cfg, "wildbg");
     duel(&format!("rollout x{trials}"), &mut oursr, &mut wildr, pairs);
 
@@ -171,7 +173,7 @@ fn main() {
     // time" fight.
     let mt: u64 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(200);
     let cfg_t = RolloutConfig { movetime_ms: mt, truncate_plies: 9, candidates: 5, ..Default::default() };
-    let mut ourst = RolloutEngine::new(our_net(), cfg_t.clone(), "ours");
+    let mut ourst = RolloutEngine::new(our_net(&onnx), cfg_t.clone(), "ours");
     let mut wildt = RolloutEngine::new(wildbg_adapter(), cfg_t, "wildbg");
     duel(&format!("rollout {mt}ms"), &mut ourst, &mut wildt, pairs);
 }
