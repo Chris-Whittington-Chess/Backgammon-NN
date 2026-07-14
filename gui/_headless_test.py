@@ -18,7 +18,15 @@ def grab(win, name):
     print("saved", name)
 
 
+def resolve_opening(win):
+    """Force the opening roll to resolve with the human starting (deterministic)."""
+    if getattr(win, "opening", False):
+        win._open_winner = 0
+        win._open_finish()
+
+
 def play_turns(win, n):
+    resolve_opening(win)
     for _ in range(n):
         if win.game_over:
             break
@@ -56,12 +64,14 @@ def main():
 
     # --- doubling cube mechanics ---
     win.new_game()
+    resolve_opening(win)
     win.on_double()                        # you offer; engine takes or drops
     assert win.cube_value == 2 or win.game_over, "double had no effect"
     print("human double ->", "cube", win.cube_value, "owner", win.cube_owner,
           "over", win.game_over, "score", win.score)
 
     win.new_game()
+    resolve_opening(win)
     win.pending_double = True
     win.busy = True
     win.on_take()
@@ -69,6 +79,7 @@ def main():
     print("take -> cube", win.cube_value, "owner", win.cube_owner)
 
     win.new_game()
+    resolve_opening(win)
     win.pending_double = True
     before = list(win.score)
     win.on_drop()

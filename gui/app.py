@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "trainer"))
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -69,6 +69,11 @@ class BoardView(QWidget):
         self.floating: tuple[float, float, bool] | None = None  # engine-move sprite
         self.cube_value = 1
         self.cube_owner: int | None = None     # None centered, 0 you, 1 engine
+        self.wink_dice = False                 # pulse the dice (your turn to roll)
+        self.wink_cube = False                 # pulse the cube (engine has doubled)
+        self.wink_on = True                    # current pulse phase
+        self.opening = False                   # showing the opening-roll dice
+        self.open_dice = None                  # (your_die, engine_die)
         self._geom = None
 
     # --- geometry ---
@@ -229,10 +234,14 @@ class BoardView(QWidget):
         p.setPen(QPen(QColor("#222")))
         p.setFont(QFont("Arial", int(r * 0.85), QFont.Bold))
         p.drawText(QRectF(x - r, y - r, 2 * r, 2 * r), Qt.AlignCenter, str(self.cube_value))
+        if self.wink_cube and self.wink_on:    # pulse ring when the engine doubles
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(SRC_RING, 4))
+            p.drawRoundedRect(QRectF(x - r - 5, y - r - 5, 2 * r + 10, 2 * r + 10), 9, 9)
 
-    def _pip_face(self, p, x, y, s, value):
-        p.setBrush(QBrush(QColor("#fafafa")))
-        p.setPen(QPen(QColor("#222"), 1))
+    def _pip_face(self, p, x, y, s, value, face=None, border=None):
+        p.setBrush(QBrush(face if face is not None else QColor("#fafafa")))
+        p.setPen(QPen(border if border is not None else QColor("#222"), 2))
         p.drawRoundedRect(QRectF(x, y, s, s), 6, 6)
         p.setBrush(QBrush(QColor("#222")))
         p.setPen(Qt.NoPen)
@@ -248,16 +257,50 @@ class BoardView(QWidget):
             p.drawEllipse(QPointF(x + gx * q, y + gy * q), r, r)
 
     def _draw_dice(self, p, g):
-        if not self.dice:
-            return
         s = g["dice_s"]
         gap = 12
-        total = len(self.dice) * s + (len(self.dice) - 1) * gap
-        x = g["W"] * 0.70 - total / 2
         y = g["H"] / 2 - s / 2
-        for v in self.dice:
-            self._pip_face(p, x, y, s, v)
-            x += s + gap
+        if self.opening and self.open_dice:    # opening roll: one die each, colour-coded
+            d_you, d_eng = self.open_dice
+            og = 34
+            x = g["W"] * 0.70 - (2 * s + og) / 2
+            xe = x + s + og
+            self._pip_face(p, x, y, s, d_you, face=QColor("#f2ead6"), border=QColor("#c8a24a"))
+            self._pip_face(p, xe, y, s, d_eng, face=QColor("#f6e7e7"), border=QColor("#9e2b25"))
+            p.setFont(QFont("Arial", 10, QFont.Bold))
+            p.setPen(QPen(QColor("#e9d9a8")))
+            p.drawText(QRectF(x, y - 22, s, 18), Qt.AlignCenter, "You")
+            p.setPen(QPen(QColor("#e6a6a0")))
+            p.drawText(QRectF(xe, y - 22, s, 18), Qt.AlignCenter, "Engine")
+            win_x = x if d_you > d_eng else xe      # ring the higher die (starts)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(SRC_RING, 3))
+            p.drawRoundedRect(QRectF(win_x - 4, y - 4, s + 8, s + 8), 8, 8)
+            return
+        if self.dice:
+            total = len(self.dice) * s + (len(self.dice) - 1) * gap
+            x0 = g["W"] * 0.70 - total / 2
+            x = x0
+            for v in self.dice:
+                self._pip_face(p, x, y, s, v)
+                x += s + gap
+            if self.wink_dice and self.wink_on:
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(SRC_RING, 3))
+                p.drawRoundedRect(QRectF(x0 - 6, y - 6, total + 12, s + 12), 9, 9)
+            return
+        if self.wink_dice:                     # your turn to roll — pulse a "roll" prompt
+            total = 2 * s + gap
+            x = g["W"] * 0.70 - total / 2
+            for _ in range(2):
+                if self.wink_on:
+                    p.setBrush(QBrush(QColor("#fafafa")))
+                    p.setPen(QPen(SRC_RING, 3))
+                else:
+                    p.setBrush(QBrush(QColor(250, 250, 250, 45)))
+                    p.setPen(QPen(QColor(255, 210, 31, 70), 2))
+                p.drawRoundedRect(QRectF(x, y, s, s), 6, 6)
+                x += s + gap
 
     def _draw_pips(self, p, g):
         p.setPen(QPen(QColor("#eafff2")))
@@ -339,6 +382,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Backgammon — bgcore")
         self.sfx = Sfx()
 
+        file_menu = self.menuBar().addMenu("&File")
+        new_act = QAction("&New Game", self)
+        new_act.setShortcut("Ctrl+N")
+        new_act.triggered.connect(self.new_game)
+        quit_act = QAction("&Quit", self)
+        quit_act.setShortcut("Ctrl+Q")
+        quit_act.triggered.connect(self.close)
+        file_menu.addAction(new_act)
+        file_menu.addSeparator()
+        file_menu.addAction(quit_act)
+
         ckpt = ROOT / "models" / "td_latest.pt"
         self.opponents = {}
         self.evaluator = None
@@ -410,6 +464,9 @@ class MainWindow(QMainWindow):
         self._roll_timer.timeout.connect(self._roll_frame)
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._anim_frame)
+        self._wink_timer = QTimer(self)
+        self._wink_timer.setInterval(430)
+        self._wink_timer.timeout.connect(self._wink_tick)
         self.busy = False
         self.score = [0, 0]          # cumulative points [you, engine]
         self.pending_double = False  # engine offered a double, awaiting take/drop
@@ -432,11 +489,22 @@ class MainWindow(QMainWindow):
         import math
         return 1.0 / (1.0 + math.exp(-1.2 * bgcore.hce_equity(disp)))
 
+    def _wink_tick(self):
+        self.view.wink_on = not self.view.wink_on
+        self.view.update()
+
     # --- view sync ---
     def refresh(self, message=None):
         disp = self.board if self.human_turn else self.board.swap_perspective()
         self.view.board = disp
-        self.view.dice = list(self.remaining) if self.remaining else list(self.roll)
+        roll_time = (self.human_turn and not self.remaining and not self.game_over
+                     and not self.busy and not self.pending_double and not self.opening)
+        if self.remaining:
+            self.view.dice = list(self.remaining)
+        elif roll_time:
+            self.view.dice = []          # clear stale dice so the roll prompt shows
+        else:
+            self.view.dice = list(self.roll)
         self.view.carrying = self.carrying
         self.view.source_points = (
             {s[0] for s in self.subs} if (self.human_turn and self.remaining) else set())
@@ -445,9 +513,12 @@ class MainWindow(QMainWindow):
         self.view.floating = None
         self.view.cube_value = self.cube_value
         self.view.cube_owner = self.cube_owner
+        self.view.opening = self.opening
+        self.view.open_dice = self._open if self.opening else None
         if message is not None:
             self.status.setText(message)
-        ready = self.human_turn and not self.remaining and not self.game_over and not self.busy
+        ready = (self.human_turn and not self.remaining and not self.game_over
+                 and not self.busy and not self.opening)
         self.roll_btn.setEnabled(ready and not self.pending_double)
         self.double_btn.setEnabled(ready and not self.pending_double and self.may_double(0))
         self.take_btn.setVisible(self.pending_double)
@@ -456,6 +527,15 @@ class MainWindow(QMainWindow):
             self.human_turn and bool(self.remaining) and self.full_roll and not self.game_over)
         self.score_label.setText(f"You {self.score[0]} — {self.score[1]} Engine")
         self.eval_bar.set_value(self._win_prob())
+        self.view.wink_dice = roll_time
+        self.view.wink_cube = self.pending_double
+        if self.view.wink_dice or self.view.wink_cube:
+            if not self._wink_timer.isActive():
+                self.view.wink_on = True
+                self._wink_timer.start()
+        elif self._wink_timer.isActive():
+            self._wink_timer.stop()
+            self.view.wink_on = True
         self.view.update()
 
     # --- game flow ---
@@ -479,16 +559,52 @@ class MainWindow(QMainWindow):
         self.pending_double = False
         self.take_btn.setVisible(False)
         self.drop_btn.setVisible(False)
-        self.refresh(f"New game vs {self.opp_box.currentText()}. Click the dice to roll.")
+        # Opening roll — one die each; the higher die starts.
+        while True:
+            d_you, d_eng = self.rng.randint(1, 6), self.rng.randint(1, 6)
+            if d_you != d_eng:
+                break
+        self._open = (d_you, d_eng)
+        self._open_winner = 0 if d_you > d_eng else 1
+        self.opening = True
+        self.view.opening = True
+        self.view.open_dice = (d_you, d_eng)
+        starter = "You" if self._open_winner == 0 else "Engine"
+        self.refresh(f"Opening roll — You {d_you}, Engine {d_eng}. {starter} start "
+                     f"(click to continue).")
+        QTimer.singleShot(1500, self._open_finish)
+
+    def _open_finish(self):
+        if not self.opening:
+            return
+        self.opening = False
+        self.view.opening = False
+        self.view.open_dice = None
+        if self._open_winner == 0:                 # you start — roll your turn
+            self.human_turn = True
+            self.remaining = []
+            self.roll = ()
+            self.refresh("You start — roll the dice.")
+        else:                                      # engine starts
+            self.human_turn = False
+            self.remaining = []
+            self.busy = True
+            self.refresh("Engine starts…")
+            QTimer.singleShot(450, self.engine_turn)
 
     def may_double(self, side):
         return (not self.game_over and self.cube_value < 64
                 and self.cube_owner in (None, side))
 
     def on_dice(self):
+        if self.opening:                # click past the opening roll
+            self._open_finish()
+            return
         if not (self.human_turn and not self.remaining and not self.game_over and not self.busy):
             return
         self.busy = True
+        self._wink_timer.stop()         # stop the roll prompt once rolling starts
+        self.view.wink_dice = False
         self.sfx.play_dice()
         self._roll_final = (self.rng.randint(1, 6), self.rng.randint(1, 6))
         self._roll_frames = 16          # longer tumble
@@ -516,6 +632,9 @@ class MainWindow(QMainWindow):
         self.refresh(f"Rolled {d1}-{d2}. Click a checker, then its destination.")
 
     def on_click(self, pid, button):
+        if self.opening:                # click past the opening roll
+            self._open_finish()
+            return
         if not self.human_turn or self.game_over or self.busy or not self.remaining:
             return
         if button == "right":
@@ -578,7 +697,8 @@ class MainWindow(QMainWindow):
     # --- doubling cube ---
     def on_double(self):
         if not (self.human_turn and not self.remaining and not self.game_over
-                and not self.busy and not self.pending_double and self.may_double(0)):
+                and not self.busy and not self.pending_double and not self.opening
+                and self.may_double(0)):
             return
         eq = self._pos_eval(self.board)  # you are on roll; your equity
         if should_take(eq):

@@ -27,15 +27,16 @@ fn main() {
     won.set_point(2, -15); // opponent stuck deep
     println!("won position:      rollout equity {:+.3}", rollout_equity(&won, &nn, &cfg));
 
-    // Rollout engine vs 1-ply search — same net, a few games.
+    // Rollout engine vs 1-ply search — same net. Pairs from argv[1] (default 3).
+    let pairs: u32 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(3);
     let mcfg = RolloutConfig { trials: 64, truncate_plies: 6, candidates: 3, seed: 0x5EED };
     let t1 = Instant::now();
     let mut a = RolloutEngine::new(&nn, mcfg, "NN-rollout");
     let mut b = SearchEngine::new(&nn, 1, "NN-1ply");
-    let stats = run_match(&mut a, &mut b, 3, 4242); // 6 games
+    let stats = run_match(&mut a, &mut b, pairs, 4242);
     println!(
         "\nNN(rollout 64x6, top-3) vs NN(1-ply):\n  {}  [{:.2} games/sec]",
         stats.summary(),
-        6.0 / t1.elapsed().as_secs_f64()
+        (pairs * 2) as f64 / t1.elapsed().as_secs_f64()
     );
 }
