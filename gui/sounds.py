@@ -34,7 +34,8 @@ def _noise_burst(n, decay, seed):
 
 
 def ensure_assets():
-    dice = ASSETS / "dice.wav"
+    # `dice2.wav` bumps the filename so the longer roll replaces any older cache.
+    dice = ASSETS / "dice2.wav"
     place = ASSETS / "place.wav"
     if not place.exists():
         # A soft tock: quick noise transient over a low decaying tone.
@@ -45,12 +46,20 @@ def ensure_assets():
         noise = _noise_burst(n, 55, 1)
         _write_wav(place, [22000 * (0.5 * t + 0.5 * z) for t, z in zip(tone, noise)])
     if not dice.exists():
-        # Three clacks with small gaps — dice tumbling and landing.
-        gap = [0.0] * int(RATE * 0.06)
-        clack1 = [18000 * s for s in _noise_burst(int(RATE * 0.05), 40, 2)]
-        clack2 = [20000 * s for s in _noise_burst(int(RATE * 0.05), 38, 3)]
-        clack3 = [24000 * s for s in _noise_burst(int(RATE * 0.07), 30, 4)]
-        _write_wav(dice, clack1 + gap + clack2 + gap + clack3)
+        # A longer tumble: a rapid rattle, then several clacks with growing gaps
+        # as the dice settle — about 1.1 s total.
+        samples = []
+        # rattle: many faint quick ticks
+        for k in range(9):
+            samples += [11000 * s for s in _noise_burst(int(RATE * 0.018), 60, 10 + k)]
+            samples += [0.0] * int(RATE * 0.028)
+        # landing clacks, louder, with increasing spacing
+        for k, (dur, amp, gap) in enumerate(
+            [(0.05, 18000, 0.07), (0.055, 21000, 0.09), (0.07, 24000, 0.12), (0.08, 22000, 0.0)]
+        ):
+            samples += [amp * s for s in _noise_burst(int(RATE * dur), 34, 30 + k)]
+            samples += [0.0] * int(RATE * gap)
+        _write_wav(dice, samples)
     return dice, place
 
 

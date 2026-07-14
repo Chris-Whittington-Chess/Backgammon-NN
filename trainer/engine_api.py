@@ -108,6 +108,12 @@ class NeuralEngine(BaseEngine):
         """Net equity for the side to move at a single position (0-ply)."""
         return float(self._static_equity_batch([board.features()])[0])
 
+    def win_prob(self, board):
+        """Net win probability P(win) for the side to move at `board`."""
+        x = self._torch.from_numpy(self._np.asarray([board.features()], dtype=self._np.float32))
+        with self._torch.no_grad():
+            return float(self.net(x)[0, 0])
+
     def _static_equity_batch(self, feats):
         """Equity (from each position's mover perspective) for a batch of
         feature vectors."""

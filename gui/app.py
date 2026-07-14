@@ -5,9 +5,9 @@ side at the bottom, bearing off to the right.
 
 Interaction:
   * Click the dice (or "Roll") to roll — the dice tumble briefly.
-  * Left-click one of your checkers to pick it up; it follows the cursor.
-  * Left-click a highlighted point (or the off tray) to drop it.
-  * Right-click to put the checker back down.
+  * Left-click one of your checkers to select it (highlighted destinations
+    appear), then left-click a destination (or the off tray) to move.
+  * Right-click, or click the checker again, to deselect.
   The turn commits automatically once all playable dice are used, then the
   computer's reply is animated. The move panel logs every turn with its equity.
 
@@ -57,17 +57,16 @@ DEST_FILL = QColor(70, 220, 120, 150)
 
 
 class BoardView(QWidget):
-    def __init__(self, on_click, on_move, on_dice):
+    def __init__(self, on_click, on_dice):
         super().__init__()
-        self.on_click, self.on_move, self.on_dice = on_click, on_move, on_dice
+        self.on_click, self.on_dice = on_click, on_dice
         self.setMinimumSize(760, 560)
-        self.setMouseTracking(True)
         self.board = bgcore.Board.starting()
         self.dice: list[int] = []
         self.source_points: set[int] = set()
         self.dest_points: set[int] = set()
-        self.carrying: int | None = None       # point picked up (drawn short)
-        self.floating: tuple[float, float, bool] | None = None  # (x, y, human?)
+        self.carrying: int | None = None       # selected source point (ringed)
+        self.floating: tuple[float, float, bool] | None = None  # engine-move sprite
         self.cube_value = 1
         self.cube_owner: int | None = None     # None centered, 0 you, 1 engine
         self._geom = None
@@ -173,8 +172,6 @@ class BoardView(QWidget):
             n = self.board.point(point)
             human = n > 0
             count = abs(n)
-            if point == self.carrying:
-                count -= 1                      # one checker is in hand
             if count == 0:
                 continue
             shown = min(count, 5)
@@ -182,10 +179,10 @@ class BoardView(QWidget):
                 label = str(count) if (i == shown - 1 and count > 5) else None
                 cx, cy = self.point_center(g, point, i)
                 self._disc(p, cx, cy, g["r"], human, label)
-            if point in self.source_points:
+            if point in self.source_points or point == self.carrying:
                 cx, cy = self.point_center(g, point, shown - 1)
                 p.setBrush(Qt.NoBrush)
-                p.setPen(QPen(SRC_RING, 3))
+                p.setPen(QPen(SRC_RING, 6 if point == self.carrying else 3))
                 p.drawEllipse(QPointF(cx, cy), g["r"] + 3, g["r"] + 3)
 
     def _draw_bar(self, p, g):
@@ -193,10 +190,10 @@ class BoardView(QWidget):
             for i in range(self.board.bar(side)):
                 cx, cy = self.point_center(g, BAR, i, side=side)
                 self._disc(p, cx, cy, g["r"], human)
-        if BAR in self.source_points:
+        if BAR in self.source_points or BAR == self.carrying:
             bx0, bx1 = g["bar"]
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(SRC_RING, 3))
+            p.setPen(QPen(SRC_RING, 6 if BAR == self.carrying else 3))
             p.drawRect(QRectF(bx0 + 2, g["H"] / 2 - 34, bx1 - bx0 - 4, 68))
 
     def _draw_off(self, p, g):
@@ -298,8 +295,42 @@ class BoardView(QWidget):
             return
         self.on_click(self.hit_test(x, y), "left")
 
-    def mouseMoveEvent(self, ev):
-        self.on_move(ev.position().x(), ev.position().y())
+
+class EvalBar(QWidget):
+    """Vertical evaluation bar from your (bottom) point of view: the ivory fill
+    rises from the bottom with your win probability; red (engine) fills the top."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedWidth(46)
+        self.human_wp = 0.5
+
+    def set_value(self, wp):
+        self.human_wp = max(0.0, min(1.0, wp))
+        self.update()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        pad = 6
+        x0, y0, bw, bh = pad, pad, w - 2 * pad, h - 2 * pad
+        p.fillRect(self.rect(), FRAME)
+        split = y0 + bh * (1.0 - self.human_wp)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(ENGINE))
+        p.drawRect(QRectF(x0, y0, bw, split - y0))     # engine (top)
+        p.setBrush(QBrush(HUMAN))
+        p.drawRect(QRectF(x0, split, bw, y0 + bh - split))  # you (bottom)
+        p.setPen(QPen(QColor("#cfcfcf"), 1))            # 50% line
+        p.drawLine(int(x0), int(y0 + bh / 2), int(x0 + bw), int(y0 + bh / 2))
+        p.setPen(QPen(QColor("#2b2b2b")))
+        p.setFont(QFont("Arial", 9, QFont.Bold))
+        p.drawText(QRectF(x0, y0 + bh - 18, bw, 16), Qt.AlignCenter,
+                   f"{self.human_wp * 100:.0f}%")
+        p.drawText(QRectF(x0, y0 + 2, bw, 16), Qt.AlignCenter,
+                   f"{(1 - self.human_wp) * 100:.0f}%")
+        p.end()
 
 
 class MainWindow(QMainWindow):
@@ -323,7 +354,7 @@ class MainWindow(QMainWindow):
         self.opponents["Random"] = RandomEngine()
         self.hint_engine = neural1 or self.opponents["HCE (heuristic)"]
 
-        self.view = BoardView(self.on_click, self.on_move, self.on_dice)
+        self.view = BoardView(self.on_click, self.on_dice)
         self.roll_btn = QPushButton("Roll")
         self.double_btn = QPushButton("Double")
         self.take_btn = QPushButton("Take")
@@ -357,8 +388,11 @@ class MainWindow(QMainWindow):
         self.moves.setFixedWidth(230)
         self.moves.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
 
+        self.eval_bar = EvalBar()
+
         board_row = QHBoxLayout()
         board_row.addWidget(self.view, 1)
+        board_row.addWidget(self.eval_bar)
         board_row.addWidget(self.moves)
 
         self.status = QLabel("")
@@ -390,6 +424,14 @@ class MainWindow(QMainWindow):
             return self.evaluator.static_equity(board)
         return bgcore.hce_equity(board)
 
+    def _win_prob(self):
+        """Your (bottom side's) win probability for the eval bar."""
+        disp = self.board if self.human_turn else self.board.swap_perspective()
+        if self.evaluator is not None:
+            return self.evaluator.win_prob(disp)
+        import math
+        return 1.0 / (1.0 + math.exp(-1.2 * bgcore.hce_equity(disp)))
+
     # --- view sync ---
     def refresh(self, message=None):
         disp = self.board if self.human_turn else self.board.swap_perspective()
@@ -397,12 +439,10 @@ class MainWindow(QMainWindow):
         self.view.dice = list(self.remaining) if self.remaining else list(self.roll)
         self.view.carrying = self.carrying
         self.view.source_points = (
-            {s[0] for s in self.subs} if (self.human_turn and self.carrying is None and self.remaining)
-            else set())
+            {s[0] for s in self.subs} if (self.human_turn and self.remaining) else set())
         self.view.dest_points = (
             {s[1] for s in self.subs if s[0] == self.carrying} if self.carrying is not None else set())
-        if self.carrying is None:
-            self.view.floating = None
+        self.view.floating = None
         self.view.cube_value = self.cube_value
         self.view.cube_owner = self.cube_owner
         if message is not None:
@@ -415,6 +455,7 @@ class MainWindow(QMainWindow):
         self.hint_btn.setEnabled(
             self.human_turn and bool(self.remaining) and self.full_roll and not self.game_over)
         self.score_label.setText(f"You {self.score[0]} — {self.score[1]} Engine")
+        self.eval_bar.set_value(self._win_prob())
         self.view.update()
 
     # --- game flow ---
@@ -450,8 +491,8 @@ class MainWindow(QMainWindow):
         self.busy = True
         self.sfx.play_dice()
         self._roll_final = (self.rng.randint(1, 6), self.rng.randint(1, 6))
-        self._roll_frames = 8
-        self._roll_timer.start(45)
+        self._roll_frames = 16          # longer tumble
+        self._roll_timer.start(55)
 
     def _roll_frame(self):
         self._roll_frames -= 1
@@ -472,25 +513,7 @@ class MainWindow(QMainWindow):
             self.refresh(f"Rolled {d1}-{d2}: no legal move (dance).")
             QTimer.singleShot(700, self.end_human_turn)
             return
-        self.refresh(f"Rolled {d1}-{d2}. Pick up a checker.")
-
-    def _lift(self, pid):
-        """Show the just-picked-up checker floating at its source point."""
-        g = self.view._geom
-        if g is None:
-            return
-        if pid == BAR:
-            cnt = self.board.bar(0)
-            xy = self.view.point_center(g, BAR, max(cnt - 1, 0), side=0)
-        else:
-            cnt = abs(self.board.point(pid))
-            xy = self.view.point_center(g, pid, max(cnt - 1, 0))
-        self.view.floating = (xy[0], xy[1], True)
-
-    def on_move(self, x, y):
-        if self.carrying is not None:
-            self.view.floating = (x, y, True)
-            self.view.update()
+        self.refresh(f"Rolled {d1}-{d2}. Click a checker, then its destination.")
 
     def on_click(self, pid, button):
         if not self.human_turn or self.game_over or self.busy or not self.remaining:
@@ -498,23 +521,27 @@ class MainWindow(QMainWindow):
         if button == "right":
             if self.carrying is not None:
                 self.carrying = None
-                self.refresh("Put it back. Pick up a checker.")
+                self.refresh("Selection cleared. Click a checker.")
             return
         sources = {s[0] for s in self.subs}
         if self.carrying is None:
             if pid in sources:
-                self.carrying = pid
-                self._lift(pid)  # show the checker lifted at its source
-                self.refresh("Carry it to a highlighted point (right-click to cancel).")
+                self.carrying = pid                    # select the source
+                self.refresh("Now click a highlighted destination.")
             return
-        # carrying: try to drop
+        if pid == self.carrying:
+            self.carrying = None                       # click again to deselect
+            self.refresh("Selection cleared. Click a checker.")
+            return
         match = next((s for s in self.subs if s[0] == self.carrying and s[1] == pid), None)
         if match:
             self.apply_submove(match)
         elif pid in sources:
-            self.carrying = pid
+            self.carrying = pid                        # switch to a different source
             self.refresh()
-        # else: keep carrying
+        else:
+            self.carrying = None                       # clicked elsewhere -> deselect
+            self.refresh()
 
     def apply_submove(self, sub):
         frm, to, die, result = sub
@@ -644,12 +671,13 @@ class MainWindow(QMainWindow):
         self.view.source_points = set()
         self.view.dest_points = set()
         self._a_frame = 0
-        self._a_frames = 10
-        self._anim_timer.start(22)
+        self._a_frames = 24             # slower checker glide
+        self._anim_timer.start(26)
 
     def _anim_frame(self):
         self._a_frame += 1
-        t = self._a_frame / self._a_frames
+        u = self._a_frame / self._a_frames
+        t = u * u * (3 - 2 * u)          # ease in-out
         x = self._a_from[0] + (self._a_to[0] - self._a_from[0]) * t
         y = self._a_from[1] + (self._a_to[1] - self._a_from[1]) * t
         self.view.floating = (x, y, False)
