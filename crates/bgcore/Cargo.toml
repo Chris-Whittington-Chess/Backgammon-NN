@@ -11,6 +11,7 @@ description = "Backgammon engine core: board, dice, move generation, evaluators.
 onnx = ["dep:tract-onnx"]
 
 [dependencies]
+rayon = "1"
 tract-onnx = { version = "=0.21.7", optional = true }
 
 [dev-dependencies]
@@ -18,4 +19,8 @@ serde_json = "1"
 
 [[example]]
 name = "nn_bench"
+required-features = ["onnx"]
+
+[[example]]
+name = "rollout_demo"
 required-features = ["onnx"]

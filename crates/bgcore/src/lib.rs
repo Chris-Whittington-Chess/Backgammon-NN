@@ -20,6 +20,7 @@ pub mod features;
 pub mod game;
 pub mod moves;
 pub mod posid;
+pub mod rollout;
 pub mod search;
 
 pub use board::Board;
@@ -30,4 +31,5 @@ pub use game::{
     play_game, result, run_match, Engine, EvalEngine, GameOutcome, GameResult, MatchStats,
 };
 pub use moves::{genmoves, next_submoves, Move, Step, SubMove, BAR, OFF};
+pub use rollout::{rollout_equity, RolloutConfig, RolloutEngine};
 pub use search::{position_value, SearchEngine};

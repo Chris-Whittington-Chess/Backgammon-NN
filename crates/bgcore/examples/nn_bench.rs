@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use bgcore::eval::{HceEval, NnEval, RandomEval};
-use bgcore::{run_match, EvalEngine, SearchEngine};
+use bgcore::{run_match, EvalEngine, RolloutConfig, RolloutEngine, SearchEngine};
 
 fn main() {
     let path = std::env::args()
@@ -63,5 +63,19 @@ fn main() {
         let stats = run_match(&mut a, &mut b, 30, 55555);
         let g = 60.0 / t0.elapsed().as_secs_f64();
         println!("NN(2-ply) vs NN(1-ply)\n  {}  [{g:.1} games/sec]", stats.summary());
+    }
+    {
+        // Parallel Monte-Carlo rollouts vs 1-ply. Rollouts are heavy — few games.
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let cfg = RolloutConfig { trials: 80, truncate_plies: 7, candidates: 3, seed: 0x5EED };
+        let t0 = Instant::now();
+        let mut a = RolloutEngine::new(&nn, cfg, "NN-rollout");
+        let mut b = SearchEngine::new(&nn, 1, "NN-1ply");
+        let stats = run_match(&mut a, &mut b, 4, 999);
+        let g = 8.0 / t0.elapsed().as_secs_f64();
+        println!(
+            "NN(rollout, 80x7) vs NN(1-ply)  [{threads} threads]\n  {}  [{g:.2} games/sec]",
+            stats.summary()
+        );
     }
 }
