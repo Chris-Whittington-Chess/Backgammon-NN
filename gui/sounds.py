@@ -7,6 +7,8 @@ QtMultimedia backend, playback is silently skipped.
 
 from __future__ import annotations
 
+import math
+import random
 import struct
 import sys
 import wave
@@ -31,16 +33,42 @@ def _write_wav(path: Path, samples):
 
 def _noise_burst(n, decay, seed):
     """A short decaying noise burst (a 'clack')."""
-    import random
-
     rng = random.Random(seed)
     return [rng.uniform(-1, 1) * (2.718 ** (-decay * i / n)) for i in range(n)]
 
 
+def _clack(n, seed, base=760.0, bright=0.30):
+    """One die landing: an ivory-ish clack rather than a click.
+
+    Broadband noise on its own reads as a synthetic tick. Real dice are small
+    dense objects that *ring* briefly, so the body here is three damped
+    sinusoidal modes (an inharmonic stack, as a struck solid gives) and the noise
+    is only a brief contact transient, low-passed to take the fizz off the top.
+    """
+    rng = random.Random(seed)
+    # (frequency, amplitude, decay) — higher modes are quieter and die faster.
+    modes = ((base, 1.0, 26.0), (base * 1.62, 0.5, 34.0), (base * 2.31, 0.22, 46.0))
+    out = []
+    lp = 0.0
+    for i in range(n):
+        t = i / RATE
+        s = sum(a * math.sin(2 * math.pi * f * t) * math.exp(-d * t) for f, a, d in modes)
+        # One-pole low-pass on the noise: keeps the contact, drops the hiss.
+        lp += 0.22 * (rng.uniform(-1, 1) - lp)
+        s += bright * lp * math.exp(-90.0 * t)
+        out.append(s)
+    peak = max(abs(v) for v in out) or 1.0
+    return [v / peak for v in out]
+
+
 def ensure_assets():
-    # `dice2.wav` bumps the filename so the longer roll replaces any older cache.
-    dice = ASSETS / "dice2.wav"
+    # The filename carries the generation: bumping it retires any older cached
+    # roll (v3 = warmer, ivory clacks instead of noise bursts).
+    dice = ASSETS / "dice3.wav"
     place = ASSETS / "place.wav"
+    for stale in ASSETS.glob("dice*.wav"):
+        if stale != dice:
+            stale.unlink()
     if not place.exists():
         # A soft tock: quick noise transient over a low decaying tone.
         import math
@@ -53,15 +81,18 @@ def ensure_assets():
         # A longer tumble: a rapid rattle, then several clacks with growing gaps
         # as the dice settle — about 1.1 s total.
         samples = []
-        # rattle: many faint quick ticks
+        # Rattle: quick, light taps, pitched high — dice knocking in the hand.
+        # Detuning each keeps it from sounding like one sample repeated.
         for k in range(9):
-            samples += [11000 * s for s in _noise_burst(int(RATE * 0.018), 60, 10 + k)]
+            samples += [9000 * s for s in
+                        _clack(int(RATE * 0.026), 10 + k, base=1180 + 90 * (k % 4), bright=0.22)]
             samples += [0.0] * int(RATE * 0.028)
-        # landing clacks, louder, with increasing spacing
-        for k, (dur, amp, gap) in enumerate(
-            [(0.05, 18000, 0.07), (0.055, 21000, 0.09), (0.07, 24000, 0.12), (0.08, 22000, 0.0)]
+        # Landing: fuller and lower, spacing out as they come to rest.
+        for k, (dur, amp, gap, base) in enumerate(
+            [(0.10, 17000, 0.07, 880), (0.11, 20000, 0.09, 760),
+             (0.13, 23000, 0.12, 690), (0.16, 21000, 0.0, 620)]
         ):
-            samples += [amp * s for s in _noise_burst(int(RATE * dur), 34, 30 + k)]
+            samples += [amp * s for s in _clack(int(RATE * dur), 30 + k, base=base)]
             samples += [0.0] * int(RATE * gap)
         _write_wav(dice, samples)
     return dice, place
