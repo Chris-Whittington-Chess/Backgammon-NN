@@ -1060,10 +1060,20 @@ class MainWindow(QMainWindow):
         self.busy = True
         self._wink_timer.stop()         # stop the roll prompt once rolling starts
         self.view.wink_dice = False
+        d1, d2 = self.rng.randint(1, 6), self.rng.randint(1, 6)
+        self._tumble(d1, d2, lambda: self._begin_human_roll(d1, d2))
+
+    def _tumble(self, d1, d2, then):
+        """Tumble the dice briefly, land on `d1, d2`, then call `then`.
+
+        Both sides roll through here, so the engine's roll is seen and heard
+        rather than just appearing. Kept short — it sits between every move.
+        """
         self.sfx.play_dice()
-        self._roll_final = (self.rng.randint(1, 6), self.rng.randint(1, 6))
-        self._roll_frames = 16          # longer tumble
-        self._roll_timer.start(55)
+        self._roll_final = (d1, d2)
+        self._roll_then = then
+        self._roll_frames = 8
+        self._roll_timer.start(45)
 
     def _roll_frame(self):
         self._roll_frames -= 1
@@ -1072,7 +1082,10 @@ class MainWindow(QMainWindow):
             self.view.update()
             return
         self._roll_timer.stop()
-        self._begin_human_roll(*self._roll_final)
+        d1, d2 = self._roll_final
+        self.view.dice = [d1, d2]
+        self.view.update()
+        self._roll_then()
 
     def _begin_human_roll(self, d1, d2, lead="Rolled"):
         """Start your turn on dice `d1, d2` — from a fresh roll, or from the
@@ -1229,6 +1242,15 @@ class MainWindow(QMainWindow):
         self.busy = True
         d1, d2 = dice if dice is not None else (self.rng.randint(1, 6), self.rng.randint(1, 6))
         self.roll = (d1, d2)
+        # Tumble first, then think: choosing can block for the best part of a
+        # second (rollouts), and the dice should be seen landing before that.
+        self.refresh(f"Engine rolls {d1}-{d2}…")
+        self._tumble(d1, d2, self._engine_move)
+
+    def _engine_move(self):
+        if self.game_over:
+            return
+        d1, d2 = self.roll
         nxt, pts, steps, eq = self.opponent.choose(self.board, d1, d2)
         self._engine_result = (nxt, pts, steps, eq, d1, d2)
         self._build_engine_animation(steps)

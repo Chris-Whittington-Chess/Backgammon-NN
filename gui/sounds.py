@@ -80,8 +80,8 @@ def _clack(n, seed, f0=1300.0, q=1.5, decay=60.0):
 
 def ensure_assets():
     # The filename carries the generation: bumping it retires any older cached
-    # roll (v4 = band-passed knocks; v3's harmonic modes rang out as a tune).
-    dice = ASSETS / "dice4.wav"
+    # roll (v5 = shorter; v4's second-long tumble dragged between every move).
+    dice = ASSETS / "dice5.wav"
     place = ASSETS / "place2.wav"
     for stale in list(ASSETS.glob("dice*.wav")) + list(ASSETS.glob("place*.wav")):
         if stale not in (dice, place):
@@ -96,23 +96,24 @@ def ensure_assets():
         samples += [0.0] * int(RATE * 0.06)
         _write_wav(place, samples)
     if not dice.exists():
-        # A tumble: a rapid rattle, then a few knocks with growing gaps as the
-        # dice settle — about 1.1 s total. Every knock's centre frequency is
-        # jittered rather than stepped: a tidy sequence of centres would be heard
-        # as a melody, which no dice roll has.
+        # A short tumble: a quick rattle, then two knocks as the dice settle —
+        # about half a second. This plays between every single move, so length is
+        # a cost: the earlier second-long roll dragged. Centre frequencies are
+        # jittered rather than stepped, since a tidy sequence of centres is heard
+        # as a melody and no dice roll has one.
         rng = random.Random(4)
         samples = []
         # Rattle: light, quick, high knocks — dice shaken together.
-        for k in range(10):
+        for k in range(5):
             samples += [7000 * s for s in _clack(
-                int(RATE * 0.020), 10 + k, f0=rng.uniform(1500, 2600), q=1.3, decay=110)]
-            samples += [0.0] * int(RATE * 0.026)
+                int(RATE * 0.018), 10 + k, f0=rng.uniform(1500, 2600), q=1.3, decay=120)]
+            samples += [0.0] * int(RATE * 0.022)
         # Landing: heavier, lower knocks as they hit the board and come to rest.
         for k, (dur, amp, gap) in enumerate(
-            [(0.05, 17000, 0.075), (0.055, 20000, 0.10), (0.06, 23000, 0.13), (0.07, 21000, 0.0)]
+            [(0.05, 20000, 0.085), (0.06, 23000, 0.0)]
         ):
             samples += [amp * s for s in _clack(
-                int(RATE * dur), 30 + k, f0=rng.uniform(800, 1500), q=1.5, decay=65)]
+                int(RATE * dur), 30 + k, f0=rng.uniform(800, 1500), q=1.5, decay=70)]
             samples += [0.0] * int(RATE * gap)
         _write_wav(dice, samples)
     return dice, place

@@ -25,6 +25,15 @@ def resolve_opening(win):
         win._open_finish()
 
 
+def finish_tumble(win):
+    """Skip the dice tumble. Both sides roll through it now, so nothing moves
+    until it lands."""
+    if win._roll_timer.isActive():
+        win._roll_timer.stop()
+        win._roll_frames = 1
+        win._roll_frame()
+
+
 def ready_to_double(win):
     """Your turn, nothing rolled — the only moment you may offer a double.
 
@@ -49,9 +58,7 @@ def play_turns(win, n):
         # there's nothing left to play.
         if win.human_turn and not win.remaining:
             win.on_dice()
-            win._roll_timer.stop()
-            win._roll_frames = 1
-            win._roll_frame()
+            finish_tumble(win)
         g = 0
         while win.human_turn and win.remaining and win.subs and not win.game_over:
             win.apply_submove(win.subs[0])
@@ -60,6 +67,7 @@ def play_turns(win, n):
         if not win.human_turn and not win.game_over:
             win.view.grab()
             win.engine_play()   # skip the double check for a fast deterministic smoke
+            finish_tumble(win)  # the engine rolls visibly before it moves
             gg = 0
             while win._anim_timer.isActive():
                 win._anim_frame()
