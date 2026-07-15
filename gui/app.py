@@ -144,6 +144,7 @@ class BoardView(QWidget):
         self.can_double = False                # you may offer a double right now
         self.hover_zone = None                 # "dice" | "cube" — which hover boxes show
         self.show_help = False                 # help panel overlays the board
+        self.hint_rows = None                  # [(notation, equity)] while hinting
         self._geom = None
 
     # --- geometry ---
@@ -240,11 +241,13 @@ class BoardView(QWidget):
         self._draw_off(p, g)
         self._draw_cube(p, g)
         self._draw_dice(p, g)
+        self._draw_numbers(p, g)
         self._draw_pips(p, g)
         if self.floating:
             x, y, human = self.floating
             self._disc(p, x, y, g["r"], human)
         self._draw_hover(p, g)   # last — the boxes overlay the board
+        self._draw_hint(p, g)
         self._draw_help(p, g)
         p.end()
 
@@ -383,6 +386,18 @@ class BoardView(QWidget):
                 p.drawRoundedRect(QRectF(x, y, s, s), 6, 6)
                 x += s + gap
 
+    def _draw_numbers(self, p, g):
+        """Point numbers in the frame, so the notation in the move list and hints
+        can be found on the board. Always your numbering — the board is always
+        drawn from your side."""
+        p.setFont(QFont("Arial", 8, QFont.Bold))
+        p.setPen(QPen(QColor("#caa76f")))
+        m = g["margin"]
+        for point in range(1, 25):
+            col, is_top = self._col_row(point)
+            box = QRectF(g["xL"][col], 1 if is_top else g["H"] - m + 1, g["pw"], m - 2)
+            p.drawText(box, Qt.AlignCenter, str(point))
+
     def _draw_pips(self, p, g):
         p.setPen(QPen(QColor("#eafff2")))
         p.setFont(QFont("Arial", 11, QFont.Bold))
@@ -451,23 +466,43 @@ class BoardView(QWidget):
                 return zone
         return None
 
+    def _panel(self, p, g, title, w, rows_h):
+        """Frame a centred overlay panel; returns the y to start drawing rows at."""
+        pad = 18
+        h = pad * 2 + 30 + rows_h
+        x = (g["W"] - w) / 2
+        y = (g["H"] - h) / 2
+        p.setBrush(QBrush(QColor(16, 18, 16, 242)))
+        p.setPen(QPen(SRC_RING, 2))
+        p.drawRoundedRect(QRectF(x, y, w, h), 10, 10)
+        p.setPen(QPen(QColor("#f7f2e2")))
+        p.setFont(QFont("Arial", 12, QFont.Bold))
+        p.drawText(QRectF(x + pad, y + pad - 2, w - 2 * pad, 24), Qt.AlignLeft, title)
+        return x, y + pad + 26
+
+    def _draw_hint(self, p, g):
+        """The ranked moves, best first, with their equities."""
+        if not self.hint_rows:
+            return
+        pad, lh, w = 18, 24, 330
+        x, ty = self._panel(p, g, "Hint — best moves", w, lh * len(self.hint_rows))
+        for i, (notation, eq) in enumerate(self.hint_rows):
+            best = i == 0
+            p.setFont(QFont("Arial", 10, QFont.Bold if best else QFont.Normal))
+            p.setPen(QPen(SRC_RING if best else QColor("#ded8c6")))
+            p.drawText(QRectF(x + pad, ty, w - 2 * pad - 60, lh),
+                       Qt.AlignLeft | Qt.AlignVCenter, notation or "(dance)")
+            p.drawText(QRectF(x + w - pad - 60, ty, 60, lh),
+                       Qt.AlignRight | Qt.AlignVCenter, f"{eq:+.2f}")
+            ty += lh
+
     def _draw_help(self, p, g):
         """A panel over the board listing what everything does."""
         if not self.show_help:
             return
         pad, lh, key_w = 18, 22, 78
         w = 470
-        h = pad * 2 + 30 + lh * len(HELP_LINES)
-        x = (g["W"] - w) / 2
-        y = (g["H"] - h) / 2
-        p.setBrush(QBrush(QColor(16, 18, 16, 242)))
-        p.setPen(QPen(SRC_RING, 2))
-        p.drawRoundedRect(QRectF(x, y, w, h), 10, 10)
-
-        p.setPen(QPen(QColor("#f7f2e2")))
-        p.setFont(QFont("Arial", 12, QFont.Bold))
-        p.drawText(QRectF(x + pad, y + pad - 2, w - 2 * pad, 24), Qt.AlignLeft, "How to play")
-        ty = y + pad + 26
+        x, ty = self._panel(p, g, "How to play", w, lh * len(HELP_LINES))
         for key, text in HELP_LINES:
             if key is None:                      # full-width intro line
                 p.setFont(QFont("Arial", 9))
@@ -660,9 +695,12 @@ class MainWindow(QMainWindow):
         self.help_btn = HoverButton("?", self.on_help_hover)
         self.help_btn.setToolTip("Hover for how to play")
         self.help_btn.setFixedWidth(30)
+        self._hint_key = None
+        self._hint_cache = None
         self.undo_btn = QPushButton("Undo")
         self.undo_btn.setToolTip("Take back the last checker you moved (Ctrl+Z)")
-        self.hint_btn = QPushButton("Hint")
+        self.hint_btn = HoverButton("Hint", self.on_hint_hover)
+        self.hint_btn.setToolTip("Hover to see the best moves ranked")
         self.new_btn = QPushButton("New Game")
         self.opp_box = QComboBox()
         self.opp_box.addItems(list(self.opponents.keys()))
@@ -737,6 +775,7 @@ class MainWindow(QMainWindow):
         self.busy = False
         self.score = [0, 0]          # cumulative points [you, engine]
         self.pending_double = False  # engine offered a double, awaiting take/drop
+        self.combos = {}             # two-dice destinations for the held checker
         self.new_game()
 
     @property
@@ -779,8 +818,11 @@ class MainWindow(QMainWindow):
         self.view.carrying = self.carrying
         self.view.source_points = (
             {s[0] for s in self.subs} if (self.human_turn and self.remaining) else set())
+        # Light up single-die destinations plus anywhere two dice can reach.
+        self.combos = self._combo_dests()
         self.view.dest_points = (
-            {s[1] for s in self.subs if s[0] == self.carrying} if self.carrying is not None else set())
+            ({s[1] for s in self.subs if s[0] == self.carrying} | set(self.combos))
+            if self.carrying is not None else set())
         self.view.floating = None
         self.view.cube_value = self.cube_value
         self.view.cube_owner = self.cube_owner
@@ -923,6 +965,32 @@ class MainWindow(QMainWindow):
             self.refresh(f"Engine starts with {d1}-{d2}…")
             QTimer.singleShot(450, lambda: self.engine_play((d1, d2)))
 
+    def _combo_dests(self):
+        """Where the selected checker can reach using *two* dice, as
+        `{final_point: first_submove}`.
+
+        Skips any route whose intermediate landing hits a blot: a hit is a real
+        event you should choose deliberately, not something to slide through on
+        the way somewhere else.
+        """
+        combos = {}
+        if self.carrying is None or not self.human_turn:
+            return combos
+        for sub in self.subs:
+            frm, to, die, result = sub
+            if frm != self.carrying or to == OFF:
+                continue
+            if self.board.point(to) == -1:      # a lone opponent checker: a hit
+                continue
+            rest = list(self.remaining)
+            rest.remove(die)
+            if not rest:
+                continue
+            for nxt in bgcore.submoves(result, rest):
+                if nxt[0] == to and nxt[1] != OFF:
+                    combos.setdefault(nxt[1], sub)
+        return combos
+
     def may_double(self, side):
         return (not self.game_over and self.cube_value < 64
                 and self.cube_owner in (None, side))
@@ -1027,6 +1095,15 @@ class MainWindow(QMainWindow):
         match = next((s for s in self.subs if s[0] == self.carrying and s[1] == pid), None)
         if match:
             self.apply_submove(match)
+        elif pid in self.combos:
+            # A two-dice destination: play the first leg, then the leg that lands
+            # on the point you actually clicked. Each leg snapshots separately,
+            # so Undo still takes them back one checker at a time.
+            first = self.combos[pid]
+            self.apply_submove(first)
+            nxt = next((s for s in self.subs if s[0] == first[1] and s[1] == pid), None)
+            if nxt is not None:
+                self.apply_submove(nxt)
         elif pid in sources:
             self.carrying = pid                        # switch to a different source
             self.refresh()
@@ -1209,15 +1286,28 @@ class MainWindow(QMainWindow):
         self._log_move("CPU", (d1, d2), steps, human_eq)
         self.refresh(f"Engine: {played}  (eq {human_eq:+.2f}). Click the dice to roll.")
 
-    def on_hint(self):
+    def _hint_rows(self):
+        """Ranked moves for the current roll as [(notation, equity)], cached.
+
+        Hovering shouldn't re-run the search: at 2-ply it's a fair fraction of a
+        second, and the answer only changes when the position or roll does.
+        """
         if not (self.human_turn and self.full_roll and self.remaining) or self.busy:
-            return
-        d1, d2 = self.roll
-        ranked = self.hint_engine.analyze(self.board, d1, d2)[:3]
-        self.view.dest_points = {t for _, t, _ in ranked[0][0] if t != OFF}
+            return None
+        key = (self.board.position_id(), self.roll)
+        if self._hint_key != key:
+            ranked = self.hint_engine.analyze(self.board, *self.roll)[:5]
+            self._hint_key = key
+            self._hint_cache = [(format_steps(s), float(eq)) for s, _, eq in ranked]
+        return self._hint_cache
+
+    def on_hint_hover(self, showing):
+        self.view.hint_rows = self._hint_rows() if showing else None
         self.view.update()
-        parts = [f"{format_steps(s)} ({eq:+.2f})" for s, _, eq in ranked]
-        self.status.setText("Hint: " + "   ".join(parts))
+
+    def on_hint(self):
+        # Clicking does the same as hovering — the panel is the hint.
+        self.on_hint_hover(True)
 
     def _log_move(self, who, roll, steps, eq_human):
         self.moves.addItem(f"{self.turn_no:2d}. {who} {roll[0]}-{roll[1]}  "

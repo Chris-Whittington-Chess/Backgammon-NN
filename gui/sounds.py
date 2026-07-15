@@ -44,62 +44,75 @@ def _noise_burst(n, decay, seed):
     return [rng.uniform(-1, 1) * (2.718 ** (-decay * i / n)) for i in range(n)]
 
 
-def _clack(n, seed, base=760.0, bright=0.30):
-    """One die landing: an ivory-ish clack rather than a click.
+def _bandpass(sig, f0, q):
+    """Two-pole band-pass (RBJ biquad). Shapes noise into a woody knock."""
+    w0 = 2 * math.pi * f0 / RATE
+    alpha = math.sin(w0) / (2 * q)
+    b0, b1, b2 = alpha, 0.0, -alpha
+    a0, a1, a2 = 1 + alpha, -2 * math.cos(w0), 1 - alpha
+    b0, b1, b2, a1, a2 = b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
+    out = []
+    x1 = x2 = y1 = y2 = 0.0
+    for x in sig:
+        y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        out.append(y)
+        x2, x1 = x1, x
+        y2, y1 = y1, y
+    return out
 
-    Broadband noise on its own reads as a synthetic tick. Real dice are small
-    dense objects that *ring* briefly, so the body here is three damped
-    sinusoidal modes (an inharmonic stack, as a struck solid gives) and the noise
-    is only a brief contact transient, low-passed to take the fizz off the top.
+
+def _clack(n, seed, f0=1300.0, q=1.5, decay=60.0):
+    """One die knock: noise shaped by a broad resonance.
+
+    Dice have no pitch — they knock. Building a clack from a stack of harmonic
+    modes gives it a definite note, and several such clacks in a row turn into a
+    tune, which is exactly what you don't want. So this is noise pushed through a
+    *wide* band-pass: enough colour to read as a small hard object on wood, too
+    broad to carry a pitch, and not the raw white hiss that reads as a click.
     """
     rng = random.Random(seed)
-    # (frequency, amplitude, decay) — higher modes are quieter and die faster.
-    modes = ((base, 1.0, 26.0), (base * 1.62, 0.5, 34.0), (base * 2.31, 0.22, 46.0))
-    out = []
-    lp = 0.0
-    for i in range(n):
-        t = i / RATE
-        s = sum(a * math.sin(2 * math.pi * f * t) * math.exp(-d * t) for f, a, d in modes)
-        # One-pole low-pass on the noise: keeps the contact, drops the hiss.
-        lp += 0.22 * (rng.uniform(-1, 1) - lp)
-        s += bright * lp * math.exp(-90.0 * t)
-        out.append(s)
+    noise = [rng.uniform(-1, 1) for _ in range(n)]
+    band = _bandpass(noise, f0, q)
+    out = [v * math.exp(-decay * i / RATE) for i, v in enumerate(band)]
     peak = max(abs(v) for v in out) or 1.0
     return [v / peak for v in out]
 
 
 def ensure_assets():
     # The filename carries the generation: bumping it retires any older cached
-    # roll (v3 = warmer, ivory clacks instead of noise bursts).
-    dice = ASSETS / "dice3.wav"
-    place = ASSETS / "place.wav"
-    for stale in ASSETS.glob("dice*.wav"):
-        if stale != dice:
+    # roll (v4 = band-passed knocks; v3's harmonic modes rang out as a tune).
+    dice = ASSETS / "dice4.wav"
+    place = ASSETS / "place2.wav"
+    for stale in list(ASSETS.glob("dice*.wav")) + list(ASSETS.glob("place*.wav")):
+        if stale not in (dice, place):
             stale.unlink()
     if not place.exists():
-        # A soft tock: quick noise transient over a low decaying tone.
-        import math
-
-        n = int(RATE * 0.09)
-        tone = [math.sin(2 * math.pi * 180 * i / RATE) * (2.718 ** (-30 * i / n)) for i in range(n)]
-        noise = _noise_burst(n, 55, 1)
-        _write_wav(place, [22000 * (0.5 * t + 0.5 * z) for t, z in zip(tone, noise)])
+        # A checker landing: the same woody knock as the dice, lower and shorter.
+        # The old one was a 90ms tone-and-hiss at half amplitude, which was all
+        # but inaudible at a sane volume. The silent tail matters: the sink is
+        # created per play, and a buffer this short can otherwise run out before
+        # the device has finished opening.
+        samples = [27000 * s for s in _clack(int(RATE * 0.075), 1, f0=950, q=1.4, decay=75)]
+        samples += [0.0] * int(RATE * 0.06)
+        _write_wav(place, samples)
     if not dice.exists():
-        # A longer tumble: a rapid rattle, then several clacks with growing gaps
-        # as the dice settle — about 1.1 s total.
+        # A tumble: a rapid rattle, then a few knocks with growing gaps as the
+        # dice settle — about 1.1 s total. Every knock's centre frequency is
+        # jittered rather than stepped: a tidy sequence of centres would be heard
+        # as a melody, which no dice roll has.
+        rng = random.Random(4)
         samples = []
-        # Rattle: quick, light taps, pitched high — dice knocking in the hand.
-        # Detuning each keeps it from sounding like one sample repeated.
-        for k in range(9):
-            samples += [9000 * s for s in
-                        _clack(int(RATE * 0.026), 10 + k, base=1180 + 90 * (k % 4), bright=0.22)]
-            samples += [0.0] * int(RATE * 0.028)
-        # Landing: fuller and lower, spacing out as they come to rest.
-        for k, (dur, amp, gap, base) in enumerate(
-            [(0.10, 17000, 0.07, 880), (0.11, 20000, 0.09, 760),
-             (0.13, 23000, 0.12, 690), (0.16, 21000, 0.0, 620)]
+        # Rattle: light, quick, high knocks — dice shaken together.
+        for k in range(10):
+            samples += [7000 * s for s in _clack(
+                int(RATE * 0.020), 10 + k, f0=rng.uniform(1500, 2600), q=1.3, decay=110)]
+            samples += [0.0] * int(RATE * 0.026)
+        # Landing: heavier, lower knocks as they hit the board and come to rest.
+        for k, (dur, amp, gap) in enumerate(
+            [(0.05, 17000, 0.075), (0.055, 20000, 0.10), (0.06, 23000, 0.13), (0.07, 21000, 0.0)]
         ):
-            samples += [amp * s for s in _clack(int(RATE * dur), 30 + k, base=base)]
+            samples += [amp * s for s in _clack(
+                int(RATE * dur), 30 + k, f0=rng.uniform(800, 1500), q=1.5, decay=65)]
             samples += [0.0] * int(RATE * gap)
         _write_wav(dice, samples)
     return dice, place
