@@ -101,7 +101,8 @@ class BoardView(QWidget):
         self.wink_on = True                    # current pulse phase
         self.opening = False                   # showing the opening-roll dice
         self.open_dice = None                  # (your_die, engine_die)
-        self.open_resolved = False             # False while the dice wind
+        self.open_resolved = False             # a winner has been thrown
+        self.open_rolling = False              # clicked; throwing (maybe re-throwing)
         self.can_double = False                # you may offer a double right now
         self.hover_zone = None                 # "dice" | "cube" — which hover boxes show
         self._geom = None
@@ -315,7 +316,9 @@ class BoardView(QWidget):
                 win_x = x if d_you > d_eng else xe  # ring the higher die (starts)
                 p.setPen(QPen(SRC_RING, 3))
                 p.drawRoundedRect(QRectF(win_x - 4, y - 4, s + 8, s + 8), 8, 8)
-            elif self.wink_on:                      # still winding — pulse both
+            elif not self.open_rolling and self.wink_on:
+                # Still winding, waiting to be clicked — pulse to say so. Once
+                # thrown, stop: a pulsing tie would read as "click me again".
                 p.setPen(QPen(SRC_RING, 3))
                 p.drawRoundedRect(QRectF(x - 10, y - 10, (xe - x) + s + 20, s + 20), 10, 10)
             return
@@ -706,6 +709,7 @@ class MainWindow(QMainWindow):
         # While the opening dice wind, _open_tick owns the faces — don't fight it.
         self.view.open_dice = self._open if self.opening else None
         self.view.open_resolved = self.opening and self.open_resolved
+        self.view.open_rolling = self.opening and self.open_rolling
         if message is not None:
             self.status.setText(message)
         ready = (self.human_turn and not self.remaining and not self.game_over
@@ -762,11 +766,13 @@ class MainWindow(QMainWindow):
         # 1-6 until you click them; the click is what actually rolls.
         self.opening = True
         self.open_resolved = False
+        self.open_rolling = False
         self._open = (1, 4)
         self._open_winner = None
         self._open_k = 0
         self.view.opening = True
         self.view.open_resolved = False
+        self.view.open_rolling = False
         self.view.open_dice = self._open
         self._open_timer.start()
         self.refresh("Click the dice to roll for who starts.")
@@ -781,21 +787,30 @@ class MainWindow(QMainWindow):
         self.view.update()
 
     def _open_roll(self):
-        """The click that rolls: stop winding, settle on a real roll, then start
-        the game once it's been seen."""
-        if not self.opening or self.open_resolved:
+        """The click that rolls: stop winding and throw one die each."""
+        if not self.opening or self.open_rolling:
             return
+        self.open_rolling = True
         self._open_timer.stop()
-        while True:
-            d_you, d_eng = self.rng.randint(1, 6), self.rng.randint(1, 6)
-            if d_you != d_eng:
-                break
+        self._open_throw()
+
+    def _open_throw(self):
+        """One throw of the opening dice. The higher die starts; a tie is shown
+        and thrown again, as at the board — rather than quietly re-rolled until
+        it happens to differ."""
+        if not self.opening:
+            return
+        d_you, d_eng = self.rng.randint(1, 6), self.rng.randint(1, 6)
         self._open = (d_you, d_eng)
-        self._open_winner = 0 if d_you > d_eng else 1
-        self.open_resolved = True
-        self.view.open_resolved = True
         self.view.open_dice = self._open
         self.sfx.play_dice()
+        if d_you == d_eng:
+            self.open_resolved = False
+            self.refresh(f"Both threw {d_you} — throwing again.")
+            QTimer.singleShot(950, self._open_throw)
+            return
+        self._open_winner = 0 if d_you > d_eng else 1
+        self.open_resolved = True
         starter = "You" if self._open_winner == 0 else "Engine"
         self.refresh(f"Opening roll — You {d_you}, Engine {d_eng}. {starter} start.")
         QTimer.singleShot(1100, self._open_finish)
@@ -808,8 +823,10 @@ class MainWindow(QMainWindow):
             self._open_winner = 0
         self.opening = False
         self.open_resolved = False
+        self.open_rolling = False
         self.view.opening = False
         self.view.open_resolved = False
+        self.view.open_rolling = False
         self.view.open_dice = None
         if self._open_winner == 0:                 # you start — roll your turn
             self.human_turn = True
