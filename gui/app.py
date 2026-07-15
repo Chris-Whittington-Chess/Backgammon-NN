@@ -95,6 +95,10 @@ HELP_LINES = [
     ("Double", "Hover the cube for a Double box."),
     ("Answer", "When the cube pulses at you, hover it for Accept / Fold."),
     ("Hint", "Ranks your best moves with their equities."),
+    ("Eval bar", "Right of the board: your live win chance. Ivory is you,"),
+    ("", "rising from the bottom; red is the engine."),
+    ("Pips", "Corner counts: how far each side has left to travel."),
+    ("Cube", "Doubles the stakes. The number is the current multiplier."),
     ("Opponent", "Rollout is strongest; drop to 2/1/0-ply for an easier game."),
 ]
 
@@ -581,8 +585,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Backgammon — bgcore")
         # Volume persists between sessions — nobody wants to re-mute every launch.
+        # First run starts at half.
         self.settings = QSettings("ChrisWhittington", "Backgammon-NN")
-        vol = float(self.settings.value("sound/volume", 0.7))
+        vol = float(self.settings.value("sound/volume", 0.5))
         self.sfx = Sfx(vol)
 
         file_menu = self.menuBar().addMenu("&File")
@@ -901,17 +906,22 @@ class MainWindow(QMainWindow):
         self.view.open_resolved = False
         self.view.open_rolling = False
         self.view.open_dice = None
-        if self._open_winner == 0:                 # you start — roll your turn
+        # The opening throw *is* the winner's first roll — they play those two
+        # dice rather than rolling again. It also means no double can be offered
+        # before the first move: the roll has already been made.
+        d1, d2 = self._open
+        while d1 == d2:
+            # A real opening throw never ties (ties are re-thrown), so this only
+            # bites when something skipped the throw and left the counter's face.
+            d1, d2 = self.rng.randint(1, 6), self.rng.randint(1, 6)
+        if self._open_winner == 0:                 # you start, on those dice
             self.human_turn = True
-            self.remaining = []
-            self.roll = ()
-            self.refresh("You start — roll the dice.")
-        else:                                      # engine starts
+            self._begin_human_roll(d1, d2, lead="You start with")
+        else:                                      # engine starts, on those dice
             self.human_turn = False
-            self.remaining = []
             self.busy = True
-            self.refresh("Engine starts…")
-            QTimer.singleShot(450, self.engine_turn)
+            self.refresh(f"Engine starts with {d1}-{d2}…")
+            QTimer.singleShot(450, lambda: self.engine_play((d1, d2)))
 
     def may_double(self, side):
         return (not self.game_over and self.cube_value < 64
@@ -974,19 +984,24 @@ class MainWindow(QMainWindow):
             self.view.update()
             return
         self._roll_timer.stop()
-        d1, d2 = self._roll_final
+        self._begin_human_roll(*self._roll_final)
+
+    def _begin_human_roll(self, d1, d2, lead="Rolled"):
+        """Start your turn on dice `d1, d2` — from a fresh roll, or from the
+        opening throw, which *is* the winner's first roll."""
         self.roll = (d1, d2)
         self.remaining = [d1] * 4 if d1 == d2 else [d1, d2]
         self.full_roll = True
         self.carrying = None
         self.human_steps = []
+        self.undo_stack = []
         self.busy = False
         self.subs = bgcore.submoves(self.board, self.remaining)
         if not self.subs:
-            self.refresh(f"Rolled {d1}-{d2}: no legal move (dance).")
+            self.refresh(f"{lead} {d1}-{d2}: no legal move (dance).")
             QTimer.singleShot(700, self.end_human_turn)
             return
-        self.refresh(f"Rolled {d1}-{d2}. Click a checker, then its destination.")
+        self.refresh(f"{lead} {d1}-{d2}. Click a checker, then its destination.")
 
     def on_click(self, pid, button):
         if self.opening:                # any click on the board rolls
@@ -1109,11 +1124,13 @@ class MainWindow(QMainWindow):
                 return
         self.engine_play()
 
-    def engine_play(self):
+    def engine_play(self, dice=None):
+        """Play the engine's turn. `dice` forces the roll — used for the opening
+        throw, which the engine plays rather than rolling afresh."""
         if self.game_over:
             return
         self.busy = True
-        d1, d2 = self.rng.randint(1, 6), self.rng.randint(1, 6)
+        d1, d2 = dice if dice is not None else (self.rng.randint(1, 6), self.rng.randint(1, 6))
         self.roll = (d1, d2)
         nxt, pts, steps, eq = self.opponent.choose(self.board, d1, d2)
         self._engine_result = (nxt, pts, steps, eq, d1, d2)
@@ -1232,24 +1249,25 @@ def selftest(report_path: str) -> int:
         report["evaluator"] = type(win.evaluator).__name__ if win.evaluator else None
         report["cube_rollouts"] = win._cube_ro is not None
 
-        # Sound: "the object exists" proves nothing — QSoundEffect loads its
-        # source asynchronously and reports Error later, so spin the loop and
-        # report what actually happened.
-        loop = QEventLoop()
-        QTimer.singleShot(2000, loop.quit)
-        loop.exec()
-        eff = win.sfx.dice
-        report["sound"] = eff is not None
-        # str(Status.Ready) -> "Status.Ready"; the enum isn't int()-able here.
-        report["sound_status"] = str(eff.status()).rsplit(".", 1)[-1] if eff else "no-effect"
-        report["sound_loaded"] = bool(eff.isLoaded()) if eff else False
-        report["sound_volume"] = round(float(eff.volume()), 2) if eff else 0.0
+        # Sound: "the object exists" proves nothing, so actually play one and
+        # check the sink went active. (QSoundEffect used to claim Ready and
+        # isPlaying here while emitting silence — hence the raw-PCM path.)
+        report["sound"] = win.sfx.ok
+        report["sound_volume"] = round(win.sfx.volume, 2)
+        report["sound_device"] = win.sfx.device_name
         try:
             from PySide6.QtMultimedia import QMediaDevices
 
-            report["audio_outputs"] = len(QMediaDevices.audioOutputs())
+            report["audio_outputs"] = [d.description() for d in QMediaDevices.audioOutputs()]
         except Exception as e:
             report["audio_outputs"] = f"QtMultimedia failed: {e}"
+
+        if win.sfx.ok:
+            win.sfx.play_dice()
+            loop = QEventLoop()
+            QTimer.singleShot(400, loop.quit)
+            loop.exec()
+            report["sound_plays"] = win.sfx.is_playing()
         # What the opponent selector actually shows on launch — the app should
         # come up playing its strongest engine.
         report["default_opponent"] = win.opp_box.currentText()

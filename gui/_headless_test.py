@@ -25,15 +25,33 @@ def resolve_opening(win):
         win._open_finish()
 
 
+def ready_to_double(win):
+    """Your turn, nothing rolled — the only moment you may offer a double.
+
+    The opening throw hands its winner a roll to play, and you can't double with
+    dice still in hand, so the cube tests need the state after that first move.
+    """
+    resolve_opening(win)
+    win.human_turn = True
+    win.remaining = []
+    win.subs = []
+    win.roll = ()
+    win.busy = False
+    win.refresh()
+
+
 def play_turns(win, n):
     resolve_opening(win)
     for _ in range(n):
         if win.game_over:
             break
-        win.on_dice()
-        win._roll_timer.stop()
-        win._roll_frames = 1
-        win._roll_frame()
+        # The opening throw is already the winner's first roll, so only roll when
+        # there's nothing left to play.
+        if win.human_turn and not win.remaining:
+            win.on_dice()
+            win._roll_timer.stop()
+            win._roll_frames = 1
+            win._roll_frame()
         g = 0
         while win.human_turn and win.remaining and win.subs and not win.game_over:
             win.apply_submove(win.subs[0])
@@ -64,7 +82,7 @@ def main():
 
     # --- doubling cube mechanics ---
     win.new_game()
-    resolve_opening(win)
+    ready_to_double(win)
     win.on_double()                        # you offer; engine takes or drops
     assert win.cube_value == 2 or win.game_over, "double had no effect"
     print("human double ->", "cube", win.cube_value, "owner", win.cube_owner,

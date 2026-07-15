@@ -108,6 +108,14 @@ def main() -> None:
     if not report.get("default_opponent", "").startswith("Rollout"):
         fail(f"expected the app to default to the rollout engine, got "
              f"{report.get('default_opponent')!r}")
+    # A build that ships silent audio looks fine from the outside: the old
+    # QSoundEffect path reported Ready and isPlaying while emitting nothing. So
+    # require the sink to actually go active on a real play.
+    if not report.get("sound"):
+        fail("no audio: the effects didn't load in the bundle")
+    if not report.get("sound_plays"):
+        fail(f"audio loaded but playing it did nothing — device "
+             f"{report.get('sound_device')!r}, outputs {report.get('audio_outputs')}")
 
     for k in ("opponents", "default_opponent", "hint_engine", "evaluator",
               "engine", "best_move_31", "equity", "sound"):

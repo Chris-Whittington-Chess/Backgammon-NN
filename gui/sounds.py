@@ -1,8 +1,15 @@
 """Tiny synthesized sound effects for the GUI.
 
 Generates two short WAV files on first use (no external assets needed) and plays
-them via QtMultimedia. All audio is best-effort: if there is no audio device or
-QtMultimedia backend, playback is silently skipped.
+them by pushing their PCM straight at the audio device via QAudioSink.
+
+We deliberately do *not* use QSoundEffect. It decodes through Qt's media backend,
+and on some Windows setups that path reports Status.Ready and isPlaying() == True
+while producing no sound at all — silent, and it lies about it. We synthesise the
+samples ourselves, so there is nothing to decode: handing raw PCM to QAudioSink
+skips the whole decoder.
+
+All audio is best-effort: with no device or no QtMultimedia, playback is skipped.
 """
 
 from __future__ import annotations
@@ -98,63 +105,95 @@ def ensure_assets():
     return dice, place
 
 
+def _pcm_from_wav(path):
+    """The raw 16-bit mono samples of a WAV, ready to hand to the device."""
+    with wave.open(str(path)) as w:
+        if (w.getnchannels(), w.getsampwidth(), w.getframerate()) != (1, 2, RATE):
+            raise ValueError(f"{path.name}: expected mono 16-bit {RATE}Hz")
+        return w.readframes(w.getnframes())
+
+
+class _Voice:
+    """One effect: its PCM, and the sink currently playing it.
+
+    A fresh QAudioSink per play keeps overlapping effects independent. Qt does
+    not take ownership of the byte array or buffer, so this holds them for as
+    long as the sink might read from them — drop the references and playback goes
+    silent or crashes.
+    """
+
+    def __init__(self, pcm, fmt, device):
+        self._pcm, self._fmt, self._device = pcm, fmt, device
+        self._sink = self._buf = self._ba = None
+
+    def play(self, volume):
+        from PySide6.QtCore import QBuffer, QByteArray
+        from PySide6.QtMultimedia import QAudioSink
+
+        self.stop()
+        self._ba = QByteArray(self._pcm)
+        self._buf = QBuffer(self._ba)
+        self._buf.open(QBuffer.ReadOnly)
+        self._sink = QAudioSink(self._device, self._fmt)
+        self._sink.setVolume(volume)
+        self._sink.start(self._buf)
+
+    def stop(self):
+        try:
+            if self._sink is not None:
+                self._sink.stop()
+        except Exception:
+            pass
+        self._sink = self._buf = self._ba = None
+
+    def is_playing(self) -> bool:
+        # Qt 6.7 renamed the QAudio namespace to QtAudio, so the enum you import
+        # may not be the one state() returns and `==` quietly fails. Compare by
+        # name, which holds either way.
+        return self._sink is not None and str(self._sink.state()).endswith("ActiveState")
+
+
 class Sfx:
     """Loads and plays the effects; degrades gracefully without audio."""
 
-    def __init__(self, volume: float = 0.7):
+    def __init__(self, volume: float = 0.5):
         self.dice = self.place = None
-        self._volume = volume
-        self._pending = set()
+        self.device_name = ""
+        self._volume = max(0.0, min(1.0, float(volume)))
         try:
-            from PySide6.QtCore import QUrl
-            from PySide6.QtMultimedia import QSoundEffect
+            from PySide6.QtMultimedia import QAudioFormat, QMediaDevices
 
+            fmt = QAudioFormat()
+            fmt.setSampleRate(RATE)
+            fmt.setChannelCount(1)
+            fmt.setSampleFormat(QAudioFormat.Int16)
+            device = QMediaDevices.defaultAudioOutput()
+            if device is None or device.isNull() or not device.isFormatSupported(fmt):
+                return
+            self.device_name = device.description()
             dice_path, place_path = ensure_assets()
-            self.dice = QSoundEffect()
-            self.dice.setSource(QUrl.fromLocalFile(str(dice_path)))
-            self.place = QSoundEffect()
-            self.place.setSource(QUrl.fromLocalFile(str(place_path)))
-            for eff in (self.dice, self.place):
-                eff.statusChanged.connect(self._flush_pending)
-            self.set_volume(volume)
+            self.dice = _Voice(_pcm_from_wav(dice_path), fmt, device)
+            self.place = _Voice(_pcm_from_wav(place_path), fmt, device)
         except Exception:
             self.dice = self.place = None
 
-    def _flush_pending(self):
-        """Play anything asked for before its WAV had finished loading."""
-        for eff in list(self._pending):
-            try:
-                if eff.isLoaded():
-                    self._pending.discard(eff)
-                    if self._volume > 0.0:
-                        eff.play()
-            except Exception:
-                self._pending.discard(eff)
+    @property
+    def ok(self) -> bool:
+        return self.dice is not None
 
     @property
     def volume(self) -> float:
         return self._volume
 
     def set_volume(self, v: float) -> None:
-        """Set playback volume, 0.0 (muted) to 1.0."""
+        """Set playback volume, 0.0 (muted) to 1.0. Takes effect on the next
+        sound; the sinks are created per play."""
         self._volume = max(0.0, min(1.0, float(v)))
-        for eff in (self.dice, self.place):
-            try:
-                if eff is not None:
-                    eff.setVolume(self._volume)
-            except Exception:
-                pass
 
-    def _play(self, eff):
+    def _play(self, voice):
         try:
-            if eff is None or self._volume <= 0.0:
-                return
-            if eff.isLoaded():
-                eff.play()
-            else:
-                # Qt silently drops play() while the source is still loading —
-                # the sound would just vanish. Play it once it's ready instead.
-                self._pending.add(eff)
+            if voice is not None and self._volume > 0.0:
+                voice.play(self._volume)
         except Exception:
             pass
 
@@ -163,3 +202,6 @@ class Sfx:
 
     def play_place(self):
         self._play(self.place)
+
+    def is_playing(self) -> bool:
+        return any(v is not None and v.is_playing() for v in (self.dice, self.place))
