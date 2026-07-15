@@ -827,7 +827,9 @@ class MainWindow(QMainWindow):
         self.view.board = disp
         roll_time = (self.human_turn and not self.remaining and not self.game_over
                      and not self.busy and not self.pending_double and not self.opening)
-        if self.remaining:
+        if self._roll_timer.isActive():
+            pass                               # a tumble owns the dice; don't spoil it
+        elif self.remaining:
             self.view.dice = list(self.remaining)
         else:
             self.view.dice = list(self.roll)   # roll-time keeps the previous roll (it winks)
@@ -1253,7 +1255,8 @@ class MainWindow(QMainWindow):
         self.roll = (d1, d2)
         # Tumble first, then think: choosing can block for the best part of a
         # second (rollouts), and the dice should be seen landing before that.
-        self.refresh(f"Engine rolls {d1}-{d2}…")
+        # Don't name the roll here — the dice haven't landed yet.
+        self.refresh("Engine rolls…")
         self._tumble(d1, d2, self._engine_move)
 
     def _engine_move(self):
