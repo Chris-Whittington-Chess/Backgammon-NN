@@ -16,12 +16,25 @@ Run: .venv/Scripts/python gui/app.py
 
 from __future__ import annotations
 
+import os
 import random
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "trainer"))
+def _root() -> Path:
+    """Base directory for bundled data (`models/`, `assets/`).
+
+    When frozen by PyInstaller the app runs from a temp unpack dir exposed as
+    `sys._MEIPASS`; from a source checkout it's the repo root.
+    """
+    bundle = getattr(sys, "_MEIPASS", None)
+    return Path(bundle) if bundle else Path(__file__).resolve().parent.parent
+
+
+ROOT = _root()
+if not getattr(sys, "frozen", False):
+    # In the bundle the trainer modules are packed as top-level modules already.
+    sys.path.insert(0, str(ROOT / "trainer"))
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QPainter, QPen, QPolygonF
@@ -39,7 +52,14 @@ from PySide6.QtWidgets import (
 
 import bgcore
 from cube import should_double, should_take
-from engine_api import HceEngine, NeuralEngine, RandomEngine, RolloutEngine, format_steps
+from engine_api import (
+    HceEngine,
+    NativeNeuralEngine,
+    NeuralEngine,
+    RandomEngine,
+    RolloutEngine,
+    format_steps,
+)
 from sounds import Sfx
 
 BAR, OFF = bgcore.BAR, bgcore.OFF
@@ -389,18 +409,32 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(quit_act)
 
+        onnx_path = ROOT / "models" / "td.onnx"
         ckpt = ROOT / "models" / "td_latest.pt"
         self.opponents = {}
         self.evaluator = None
         neural1 = None
-        if ckpt.exists():
+
+        # Prefer the native (Rust/ONNX) net: same play, several times faster, and
+        # no torch — it's the only neural path in the packaged app. Fall back to
+        # the torch checkpoint for source checkouts built without the onnx
+        # feature.
+        neurals = []
+        if hasattr(bgcore, "Neural") and onnx_path.exists():
+            neurals = [NativeNeuralEngine(onnx_path, lookahead=p) for p in (0, 1, 2)]
+        elif ckpt.exists():
             neural0 = NeuralEngine(ckpt, lookahead=0)
-            neural1 = NeuralEngine(ckpt, lookahead=1, share=neural0)
-            neural2 = NeuralEngine(ckpt, lookahead=2, share=neural0)
-            for e in (neural0, neural1, neural2):
+            neurals = [
+                neural0,
+                NeuralEngine(ckpt, lookahead=1, share=neural0),
+                NeuralEngine(ckpt, lookahead=2, share=neural0),
+            ]
+        if neurals:
+            for e in neurals:
                 self.opponents[e.name] = e
-            self.evaluator = neural0
-        onnx_path = ROOT / "models" / "td.onnx"
+            self.evaluator = neurals[0]
+            neural1 = neurals[1]
+
         self._cube_ro = None
         if hasattr(bgcore, "Rollouts") and onnx_path.exists():
             ro = RolloutEngine(onnx_path, movetime_ms=800, truncate_plies=9, candidates=5)
@@ -855,7 +889,47 @@ class MainWindow(QMainWindow):
         return {1: "a single", 2: "a gammon", 3: "a backgammon"}[pts]
 
 
+def selftest(report_path: str) -> int:
+    """Build the window offscreen, exercise the engine, and write a JSON report.
+
+    A packaged windowed build has nowhere to print, and a missing `td.onnx`
+    wouldn't crash it — the neural opponents would just quietly vanish. So the
+    report names the engines that actually loaded and plays a move, and the
+    release build is checked against it. Returns a process exit code.
+    """
+    import json
+    import traceback
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    report = {"ok": False, "frozen": bool(getattr(sys, "frozen", False)), "root": str(ROOT)}
+    try:
+        QApplication(sys.argv[:1])
+        win = MainWindow()
+        report["opponents"] = list(win.opponents)
+        report["evaluator"] = type(win.evaluator).__name__ if win.evaluator else None
+        report["cube_rollouts"] = win._cube_ro is not None
+        report["sound"] = win.sfx.dice is not None
+
+        # Play a real move with the strongest neural engine that loaded.
+        board = bgcore.Board.starting()
+        eng = win.opponents.get("Neural — 2-ply") or win.hint_engine
+        ranked = eng.analyze(board, 3, 1)
+        report["engine"] = eng.name
+        report["best_move_31"] = format_steps(ranked[0][0])
+        report["equity"] = round(float(ranked[0][2]), 4)
+        report["moves_ranked"] = len(ranked)
+        report["torch_imported"] = "torch" in sys.modules
+        report["ok"] = True
+    except Exception:
+        report["error"] = traceback.format_exc()
+
+    Path(report_path).write_text(json.dumps(report, indent=2))
+    return 0 if report["ok"] else 1
+
+
 def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
+        sys.exit(selftest(sys.argv[2]))
     app = QApplication(sys.argv)
     win = MainWindow()
     win.resize(1080, 700)

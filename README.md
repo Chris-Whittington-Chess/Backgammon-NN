@@ -5,10 +5,24 @@ core is Rust (fast, validated move generation); training is PyTorch
 (TD/Monte-Carlo self-play); inference runs natively in Rust via ONNX; and there
 are two ways to play — a PySide6 **desktop app** and a **text-only console app**.
 
-The trained net **beats the hand-crafted evaluator ~84%** and learned entirely
-from self-play, starting from random weights. It's a full toolkit: extend the
-training to grow stronger nets, build new networks, run automatic engine-vs-engine
-matches (against other engines or itself), and play the result on your PC.
+The net learned to play entirely from self-play, starting from random weights.
+It beats the hand-crafted evaluator decisively, and at equal search it holds its
+own against the [wildbg](https://github.com/carsten-wenderdel/wildbg) reference
+engine. It's a full toolkit: extend the training to grow stronger nets, build new
+networks, run automatic engine-vs-engine matches (against other engines or
+itself), and play the result on your PC.
+
+## Download
+
+**[Download Backgammon.exe](../../releases/latest)** (Windows 64-bit, ~62 MB) —
+no install, no Python, no PyTorch. Double-click and play.
+
+Everything is in the one file: the GUI, the Rust engine, and the trained net.
+The engine runs natively via the embedded ONNX runtime, so the packaged app
+plays exactly as the source build does.
+
+> Windows SmartScreen will warn about an unrecognized publisher — the exe isn't
+> code-signed. Choose *More info* → *Run anyway*.
 
 ## Architecture
 
@@ -27,6 +41,7 @@ PySide6 GUI  ──►  Python (trainer + engine adapters)  ──PyO3──► 
 | Python bindings (PyO3) | `crates/bgpy` → import as `bgcore` |
 | Trainer, model, engine adapters | `trainer/` |
 | Desktop GUI | `gui/` |
+| Standalone app build (PyInstaller) | `packaging/` |
 | Move-gen differential test vs [wildbg](https://github.com/carsten-wenderdel/wildbg) | `tools/movegen-difftest` |
 | Full spec | `SPEC.md` |
 
@@ -34,12 +49,16 @@ PySide6 GUI  ──►  Python (trainer + engine adapters)  ──PyO3──► 
 
 - **Move generation validated** against the wildbg reference engine across
   3.15M (position, dice) pairs — zero mismatches.
-- **198-input Tesauro encoding** and a 198→128→5 value net (win / gammon /
-  backgammon probabilities), trained by self-play.
+- **198-input Tesauro encoding** and a 198→256→128→5 value net (win / gammon /
+  backgammon probabilities) with squared-ReLU activations, trained by self-play.
+  Depth was what broke the earlier net's strength ceiling: this net beats the
+  older 128-wide one **58.8%** head-to-head.
 - **Cross-language parity**: PyTorch → ONNX → Rust `tract` inference match to
   <1e-4.
-- **1-ply search** beats the same net at 0-ply **62.5%** head-to-head.
-- **GnuBG-compatible Position IDs** for interop.
+- **Expectiminimax search** to 2 ply with GNUbg-style candidate pruning, plus
+  parallel Monte-Carlo **rollouts**. 1-ply beats 0-ply **62.5%** head-to-head.
+- **Doubling cube** (money play) and a **GnuBG-compatible Position ID** for
+  interop.
 
 ## Setup
 
@@ -49,7 +68,8 @@ Requires Rust (stable) and Python 3.9+.
 # Python env + build the Rust extension
 python -m venv .venv
 .venv/Scripts/pip install maturin numpy torch onnx onnxruntime PySide6
-cd crates/bgpy && ../../.venv/Scripts/maturin develop --release && cd ../..
+# --features onnx builds the native net + rollout engine into the extension
+cd crates/bgpy && ../../.venv/Scripts/maturin develop --release --features onnx && cd ../..
 ```
 
 ## Run
@@ -75,6 +95,9 @@ cargo run --release --example match
 
 # Rust tests
 cargo test
+
+# Build the standalone app -> dist/Backgammon.exe (verifies the exe it produces)
+.venv/Scripts/python packaging/build.py
 ```
 
 The trained checkpoint (`models/td_latest.pt`) and its ONNX export
@@ -83,8 +106,10 @@ The trained checkpoint (`models/td_latest.pt`) and its ONNX export
 ## Status
 
 The original spec (M0–M6) is complete: engine, validated move generation,
-TD-trained neural evaluator, ONNX/native inference, n-ply search, and a GUI.
-Possible next steps: deeper search, the doubling cube, and richer features.
+TD-trained neural evaluator, ONNX/native inference, n-ply search, and a GUI —
+plus the doubling cube, Monte-Carlo rollouts, and a packaged standalone app.
+Possible next steps: cubeful (Janowski) equity, match play, and richer features
+such as wildbg-style split contact/race nets.
 
 ## License
 

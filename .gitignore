@@ -24,6 +24,11 @@ venv/
 /models/*.json
 /data/
 
+# Packaged app — built by packaging/build.py, published as a GitHub release
+/dist/
+/build/
+/packaging/backgammon.ico
+
 # Editor / OS
 .vscode/
 .idea/

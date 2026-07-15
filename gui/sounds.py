@@ -8,10 +8,14 @@ QtMultimedia backend, playback is silently skipped.
 from __future__ import annotations
 
 import struct
+import sys
 import wave
 from pathlib import Path
 
-ASSETS = Path(__file__).resolve().parent / "assets"
+# Frozen (PyInstaller) builds ship the WAVs and unpack them under `sys._MEIPASS`;
+# from source they live next to this file and are generated on first use.
+_BASE = getattr(sys, "_MEIPASS", None)
+ASSETS = (Path(_BASE) if _BASE else Path(__file__).resolve().parent) / "assets"
 RATE = 44100
 
 
