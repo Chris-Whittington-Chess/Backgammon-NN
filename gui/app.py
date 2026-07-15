@@ -36,7 +36,7 @@ if not getattr(sys, "frozen", False):
     # In the bundle the trainer modules are packed as top-level modules already.
     sys.path.insert(0, str(ROOT / "trainer"))
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QSettings, QTimer
+from PySide6.QtCore import Qt, QEventLoop, QPointF, QRectF, QSettings, QTimer
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QCursor, QFont, QPainter, QPen, QPolygonF,
 )
@@ -79,6 +79,40 @@ SRC_RING = QColor("#ffd21f")
 DEST_FILL = QColor(70, 220, 120, 150)
 
 
+# What the help panel says. Kept next to the code it describes so it can't
+# quietly drift out of date.
+HELP_LINES = [
+    # key=None spans the full width — an intro line, not a key/value row.
+    (None, "Anything pulsing wants a click. Hover it and a box"),
+    (None, "appears telling you what that click will do."),
+    ("Start", "Click the counting dice: one die each, higher starts."),
+    ("Roll", "Click the dice, or hover them for a Roll box."),
+    ("Move", "Click one of your checkers, then a highlighted point."),
+    ("", "Your movable checkers are ringed. Bear off to the tray."),
+    ("Deselect", "Right-click, or click the same checker again."),
+    ("Take back", "Undo (Ctrl+Z) — one checker at a time, back to"),
+    ("", "the start of your turn. Your last die commits the turn."),
+    ("Double", "Hover the cube for a Double box."),
+    ("Answer", "When the cube pulses at you, hover it for Accept / Fold."),
+    ("Hint", "Ranks your best moves with their equities."),
+    ("Opponent", "Rollout is strongest; drop to 2/1/0-ply for an easier game."),
+]
+
+
+class HoverButton(QPushButton):
+    """A button that reports hover, so the help panel can follow the cursor."""
+
+    def __init__(self, text, on_hover):
+        super().__init__(text)
+        self._on_hover = on_hover
+
+    def enterEvent(self, ev):
+        self._on_hover(True)
+
+    def leaveEvent(self, ev):
+        self._on_hover(False)
+
+
 class BoardView(QWidget):
     def __init__(self, on_click, on_dice, on_action=None):
         super().__init__()
@@ -105,6 +139,7 @@ class BoardView(QWidget):
         self.open_rolling = False              # clicked; throwing (maybe re-throwing)
         self.can_double = False                # you may offer a double right now
         self.hover_zone = None                 # "dice" | "cube" — which hover boxes show
+        self.show_help = False                 # help panel overlays the board
         self._geom = None
 
     # --- geometry ---
@@ -206,6 +241,7 @@ class BoardView(QWidget):
             x, y, human = self.floating
             self._disc(p, x, y, g["r"], human)
         self._draw_hover(p, g)   # last — the boxes overlay the board
+        self._draw_help(p, g)
         p.end()
 
     def _disc(self, p, cx, cy, r, human, label=None):
@@ -411,6 +447,40 @@ class BoardView(QWidget):
                 return zone
         return None
 
+    def _draw_help(self, p, g):
+        """A panel over the board listing what everything does."""
+        if not self.show_help:
+            return
+        pad, lh, key_w = 18, 22, 78
+        w = 470
+        h = pad * 2 + 30 + lh * len(HELP_LINES)
+        x = (g["W"] - w) / 2
+        y = (g["H"] - h) / 2
+        p.setBrush(QBrush(QColor(16, 18, 16, 242)))
+        p.setPen(QPen(SRC_RING, 2))
+        p.drawRoundedRect(QRectF(x, y, w, h), 10, 10)
+
+        p.setPen(QPen(QColor("#f7f2e2")))
+        p.setFont(QFont("Arial", 12, QFont.Bold))
+        p.drawText(QRectF(x + pad, y + pad - 2, w - 2 * pad, 24), Qt.AlignLeft, "How to play")
+        ty = y + pad + 26
+        for key, text in HELP_LINES:
+            if key is None:                      # full-width intro line
+                p.setFont(QFont("Arial", 9))
+                p.setPen(QPen(QColor("#b9b1a0")))
+                p.drawText(QRectF(x + pad, ty, w - 2 * pad, lh),
+                           Qt.AlignLeft | Qt.AlignVCenter, text)
+                ty += lh
+                continue
+            p.setFont(QFont("Arial", 9, QFont.Bold))
+            p.setPen(QPen(SRC_RING))
+            p.drawText(QRectF(x + pad, ty, key_w, lh), Qt.AlignLeft | Qt.AlignVCenter, key)
+            p.setFont(QFont("Arial", 9))
+            p.setPen(QPen(QColor("#ded8c6")))
+            p.drawText(QRectF(x + pad + key_w, ty, w - 2 * pad - key_w, lh),
+                       Qt.AlignLeft | Qt.AlignVCenter, text)
+            ty += lh
+
     def _draw_hover(self, p, g):
         if self.hover_zone is None:
             return
@@ -582,6 +652,9 @@ class MainWindow(QMainWindow):
         self.double_btn = QPushButton("Double")
         self.take_btn = QPushButton("Take")
         self.drop_btn = QPushButton("Drop")
+        self.help_btn = HoverButton("?", self.on_help_hover)
+        self.help_btn.setToolTip("Hover for how to play")
+        self.help_btn.setFixedWidth(30)
         self.undo_btn = QPushButton("Undo")
         self.undo_btn.setToolTip("Take back the last checker you moved (Ctrl+Z)")
         self.hint_btn = QPushButton("Hint")
@@ -616,6 +689,7 @@ class MainWindow(QMainWindow):
                   self.undo_btn, self.hint_btn, self.new_btn,
                   QLabel("Opponent:"), self.opp_box):
             controls.addWidget(w)
+        controls.addWidget(self.help_btn)
         controls.addStretch(1)
         controls.addWidget(self.vol_label)
         controls.addWidget(self.vol_slider)
@@ -651,9 +725,9 @@ class MainWindow(QMainWindow):
         self._wink_timer = QTimer(self)
         self._wink_timer.setInterval(430)
         self._wink_timer.timeout.connect(self._wink_tick)
-        # Opening dice wind through 1-6 once a second until you click to roll.
+        # Opening dice count 1-6 together until you click to roll.
         self._open_timer = QTimer(self)
-        self._open_timer.setInterval(1000 // 6)
+        self._open_timer.setInterval(250)
         self._open_timer.timeout.connect(self._open_tick)
         self.busy = False
         self.score = [0, 0]          # cumulative points [you, engine]
@@ -778,11 +852,10 @@ class MainWindow(QMainWindow):
         self.refresh("Click the dice to roll for who starts.")
 
     def _open_tick(self):
-        """Wind both dice through 1-6 while we wait for the click."""
+        """Count both dice up 1-6 together, over and over, until the click."""
         self._open_k += 1
-        k = self._open_k
-        # Offset the two dice so they don't march in lockstep.
-        self._open = ((k % 6) + 1, ((k + 3) % 6) + 1)
+        v = (self._open_k % 6) + 1
+        self._open = (v, v)
         self.view.open_dice = self._open
         self.view.update()
 
@@ -843,6 +916,10 @@ class MainWindow(QMainWindow):
     def may_double(self, side):
         return (not self.game_over and self.cube_value < 64
                 and self.cube_owner in (None, side))
+
+    def on_help_hover(self, showing):
+        self.view.show_help = showing
+        self.view.update()
 
     def _sync_vol_label(self):
         self.vol_label.setText("🔇" if self.sfx.volume <= 0 else "🔊")
@@ -1154,7 +1231,25 @@ def selftest(report_path: str) -> int:
         report["opponents"] = list(win.opponents)
         report["evaluator"] = type(win.evaluator).__name__ if win.evaluator else None
         report["cube_rollouts"] = win._cube_ro is not None
-        report["sound"] = win.sfx.dice is not None
+
+        # Sound: "the object exists" proves nothing — QSoundEffect loads its
+        # source asynchronously and reports Error later, so spin the loop and
+        # report what actually happened.
+        loop = QEventLoop()
+        QTimer.singleShot(2000, loop.quit)
+        loop.exec()
+        eff = win.sfx.dice
+        report["sound"] = eff is not None
+        # str(Status.Ready) -> "Status.Ready"; the enum isn't int()-able here.
+        report["sound_status"] = str(eff.status()).rsplit(".", 1)[-1] if eff else "no-effect"
+        report["sound_loaded"] = bool(eff.isLoaded()) if eff else False
+        report["sound_volume"] = round(float(eff.volume()), 2) if eff else 0.0
+        try:
+            from PySide6.QtMultimedia import QMediaDevices
+
+            report["audio_outputs"] = len(QMediaDevices.audioOutputs())
+        except Exception as e:
+            report["audio_outputs"] = f"QtMultimedia failed: {e}"
         # What the opponent selector actually shows on launch — the app should
         # come up playing its strongest engine.
         report["default_opponent"] = win.opp_box.currentText()

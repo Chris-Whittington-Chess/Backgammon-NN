@@ -104,6 +104,7 @@ class Sfx:
     def __init__(self, volume: float = 0.7):
         self.dice = self.place = None
         self._volume = volume
+        self._pending = set()
         try:
             from PySide6.QtCore import QUrl
             from PySide6.QtMultimedia import QSoundEffect
@@ -113,9 +114,22 @@ class Sfx:
             self.dice.setSource(QUrl.fromLocalFile(str(dice_path)))
             self.place = QSoundEffect()
             self.place.setSource(QUrl.fromLocalFile(str(place_path)))
+            for eff in (self.dice, self.place):
+                eff.statusChanged.connect(self._flush_pending)
             self.set_volume(volume)
         except Exception:
             self.dice = self.place = None
+
+    def _flush_pending(self):
+        """Play anything asked for before its WAV had finished loading."""
+        for eff in list(self._pending):
+            try:
+                if eff.isLoaded():
+                    self._pending.discard(eff)
+                    if self._volume > 0.0:
+                        eff.play()
+            except Exception:
+                self._pending.discard(eff)
 
     @property
     def volume(self) -> float:
@@ -133,8 +147,14 @@ class Sfx:
 
     def _play(self, eff):
         try:
-            if eff is not None and self._volume > 0.0:
+            if eff is None or self._volume <= 0.0:
+                return
+            if eff.isLoaded():
                 eff.play()
+            else:
+                # Qt silently drops play() while the source is still loading —
+                # the sound would just vanish. Play it once it's ready instead.
+                self._pending.add(eff)
         except Exception:
             pass
 
