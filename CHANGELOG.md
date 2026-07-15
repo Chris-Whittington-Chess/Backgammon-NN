@@ -9,6 +9,42 @@ Downloads: [Releases](../../releases). The app is a single self-contained
 
 ---
 
+## v1.4.3 — the dice you see are the dice it plays
+
+- **The engine appeared to roll one pair and move on another.** The tumble's last
+  frame set the dice and called `update()`, which only *queues* a repaint — then
+  handed straight to the engine, which blocks the UI thread for the best part of
+  a second choosing via rollouts. The queued paint couldn't run until after that,
+  so the last random tumble frame sat on screen looking like the roll, and the
+  real dice only appeared as the engine moved. `repaint()` paints synchronously,
+  so the roll is on screen before the block.
+- Found by watching the app play. The selftest and headless test passed
+  throughout: they check the engine rolls and moves correctly, not what's drawn
+  mid-animation, so a rendering-order artifact is invisible to them.
+
+## v1.4.2 — engine dice fixes
+
+Both introduced by v1.4.1's roll animation:
+
+- **The engine re-rolled the opening throw it had just won.** The throw is handed
+  to `engine_play`, which now tumbles before moving — so winning the throw 2-6
+  meant visibly rolling again before playing 2-6. A roll already on the table is
+  played as-is.
+- **The roll was shown before it landed.** The status line named the roll before
+  tumbling, and `refresh()` writes the final dice into the view — so the pair
+  appeared, the tumble rolled other pairs over the top, and it came back.
+  `refresh()` now leaves the dice alone while a tumble owns them.
+
+## v1.4.1 — the engine rolls where you can see it
+
+- **The engine's dice never rolled.** It set its roll and moved in one step —
+  no tumble, no sound. Both sides now roll through one shared `_tumble()`: sound,
+  a brief tumble, the dice land, and only then does the mover act. The engine
+  tumbles *before* it thinks, since choosing can block for ~0.8s with rollouts.
+- **Less time rolling** — it sits between every move: the tumble is 360ms (was
+  880ms) and the roll sound 0.39s (was 1.00s), so the two now line up instead of
+  a second-long sound running past a stale board.
+
 ## v1.4.0 — both numberings on the board
 
 - **Dual point numbers.** Every point is labelled with both numberings: yours in
