@@ -76,6 +76,8 @@ HUMAN_EDGE = QColor("#b9a97e")
 ENGINE = QColor("#9e2b25")
 ENGINE_EDGE = QColor("#511210")
 SRC_RING = QColor("#ffd21f")
+HUMAN_NUM = QColor("#e9dcc0")          # your point numbers
+ENGINE_NUM = QColor("#b8635c")         # the engine's numbering of the same points
 DEST_FILL = QColor(70, 220, 120, 150)
 
 
@@ -95,6 +97,9 @@ HELP_LINES = [
     ("Double", "Hover the cube for a Double box."),
     ("Answer", "When the cube pulses at you, hover it for Accept / Fold."),
     ("Hint", "Ranks your best moves with their equities."),
+    ("Numbers", "Ivory = your point numbers, red = the engine's. Each side"),
+    ("", "counts from its own home, so your 8 is its 17 (they total 25)."),
+    ("", "Your moves read off ivory, the CPU's log lines off red."),
     ("Eval bar", "Right of the board: your live win chance. Ivory is you,"),
     ("", "rising from the bottom; red is the engine."),
     ("Pips", "Corner counts: how far each side has left to travel."),
@@ -387,16 +392,27 @@ class BoardView(QWidget):
                 x += s + gap
 
     def _draw_numbers(self, p, g):
-        """Point numbers in the frame, so the notation in the move list and hints
-        can be found on the board. Always your numbering — the board is always
-        drawn from your side."""
-        p.setFont(QFont("Arial", 8, QFont.Bold))
-        p.setPen(QPen(QColor("#caa76f")))
-        m = g["margin"]
+        """Both point numberings in the frame, so any notation can be found on the
+        board.
+
+        Backgammon has no single numbering: each player counts 1-24 from their own
+        home, and moves are always written from the mover's own view. So your
+        moves and hints read off the ivory numbers, and the engine's log lines
+        read off the red ones. The two always sum to 25.
+        """
+        m, pw = g["margin"], g["pw"]
         for point in range(1, 25):
             col, is_top = self._col_row(point)
-            box = QRectF(g["xL"][col], 1 if is_top else g["H"] - m + 1, g["pw"], m - 2)
-            p.drawText(box, Qt.AlignCenter, str(point))
+            x0 = g["xL"][col]
+            y = 1 if is_top else g["H"] - m + 1
+            p.setFont(QFont("Arial", 8, QFont.Bold))
+            p.setPen(QPen(HUMAN_NUM))
+            p.drawText(QRectF(x0, y, pw / 2 - 1, m - 2),
+                       Qt.AlignRight | Qt.AlignVCenter, str(point))
+            p.setFont(QFont("Arial", 7))
+            p.setPen(QPen(ENGINE_NUM))
+            p.drawText(QRectF(x0 + pw / 2 + 2, y, pw / 2 - 2, m - 2),
+                       Qt.AlignLeft | Qt.AlignVCenter, str(25 - point))
 
     def _draw_pips(self, p, g):
         p.setPen(QPen(QColor("#eafff2")))
@@ -994,6 +1010,10 @@ class MainWindow(QMainWindow):
     def may_double(self, side):
         return (not self.game_over and self.cube_value < 64
                 and self.cube_owner in (None, side))
+
+    def closeEvent(self, ev):
+        self.sfx.stop_all()
+        super().closeEvent(ev)
 
     def on_help_hover(self, showing):
         self.view.show_help = showing

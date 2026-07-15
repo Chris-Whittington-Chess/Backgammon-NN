@@ -127,27 +127,34 @@ def _pcm_from_wav(path):
 
 
 class _Voice:
-    """One effect: its PCM, and the sink currently playing it.
+    """One effect: its PCM, its buffer and its sink — each built once and reused.
 
-    A fresh QAudioSink per play keeps overlapping effects independent. Qt does
-    not take ownership of the byte array or buffer, so this holds them for as
-    long as the sink might read from them — drop the references and playback goes
-    silent or crashes.
+    Replaying rewinds the buffer and restarts the same sink. Building a fresh
+    QAudioSink per play and dropping the old one is what you'd write first, and
+    it intermittently segfaults: the discarded sink can still be streaming when
+    Python collects it. Qt doesn't own the byte array or buffer either, so those
+    are held for the life of the voice.
     """
 
     def __init__(self, pcm, fmt, device):
         self._pcm, self._fmt, self._device = pcm, fmt, device
         self._sink = self._buf = self._ba = None
 
-    def play(self, volume):
+    def _ensure(self):
+        if self._sink is not None:
+            return
         from PySide6.QtCore import QBuffer, QByteArray
         from PySide6.QtMultimedia import QAudioSink
 
-        self.stop()
         self._ba = QByteArray(self._pcm)
         self._buf = QBuffer(self._ba)
         self._buf.open(QBuffer.ReadOnly)
         self._sink = QAudioSink(self._device, self._fmt)
+
+    def play(self, volume):
+        self._ensure()
+        self._sink.stop()
+        self._buf.seek(0)
         self._sink.setVolume(volume)
         self._sink.start(self._buf)
 
@@ -157,7 +164,6 @@ class _Voice:
                 self._sink.stop()
         except Exception:
             pass
-        self._sink = self._buf = self._ba = None
 
     def is_playing(self) -> bool:
         # Qt 6.7 renamed the QAudio namespace to QtAudio, so the enum you import
@@ -218,3 +224,10 @@ class Sfx:
 
     def is_playing(self) -> bool:
         return any(v is not None and v.is_playing() for v in (self.dice, self.place))
+
+    def stop_all(self) -> None:
+        """Silence the sinks — call before teardown so nothing is mid-stream
+        while Qt is destroying the audio objects underneath it."""
+        for v in (self.dice, self.place):
+            if v is not None:
+                v.stop()

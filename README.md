@@ -47,6 +47,7 @@ PySide6 GUI  ──►  Python (trainer + engine adapters)  ──PyO3──► 
 | Trainer, model, engine adapters | `trainer/` |
 | Desktop GUI | `gui/` |
 | Standalone app build (PyInstaller) | `packaging/` |
+| Development log (what changed, and why) | [`CHANGELOG.md`](CHANGELOG.md) |
 | Move-gen differential test vs [wildbg](https://github.com/carsten-wenderdel/wildbg) | `tools/movegen-difftest` |
 | Full spec | `SPEC.md` |
 
