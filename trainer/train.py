@@ -208,29 +208,54 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=str, default="td_latest.pt",
                     help="checkpoint filename under models/ (keep the live net safe)")
+    ap.add_argument("--resume", type=str, default=None,
+                    help="continue from a checkpoint under models/ (keeps the "
+                         "optimizer state and the exploration schedule)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
     sizes = [int(x) for x in args.hidden.split(",")]
     hidden = sizes[0] if len(sizes) == 1 else sizes
-    net = ValueNet(hidden, args.act)
-    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     MODELS_DIR.mkdir(exist_ok=True)
 
-    print(f"TD(lambda={args.lam}) self-play | hidden={hidden} act={args.act} lr={args.lr}")
-    print("Baseline (untrained net):")
-    wr, ppg = benchmark(net, random_policy(), args.bench_games, rng)
-    print(f"  vs Random: win {100*wr:.1f}%  PPG {ppg:+.3f}")
+    start_iter = 0
+    if args.resume:
+        ck = torch.load(MODELS_DIR / args.resume, map_location="cpu")
+        # Trust the checkpoint's shape over the flags: resuming into a different
+        # architecture silently trains a different net.
+        if ck.get("hidden") != hidden or ck.get("act") != args.act:
+            raise SystemExit(
+                f"--resume {args.resume} is hidden={ck.get('hidden')} act={ck.get('act')}, "
+                f"but you asked for hidden={hidden} act={args.act}")
+        net = ValueNet(hidden, args.act)
+        net.load_state_dict(ck["model"])
+        opt = torch.optim.Adam(net.parameters(), lr=args.lr)
+        if "opt" in ck:
+            opt.load_state_dict(ck["opt"])   # Adam's moments matter across a long run
+        start_iter = int(ck.get("iter", 0))
+        print(f"Resumed {args.resume} at iter {start_iter} "
+              f"(optimizer state: {'restored' if 'opt' in ck else 'MISSING — fresh Adam'})")
+    else:
+        net = ValueNet(hidden, args.act)
+        opt = torch.optim.Adam(net.parameters(), lr=args.lr)
 
-    for it in range(1, args.iters + 1):
+    print(f"TD(lambda={args.lam}) self-play | hidden={hidden} act={args.act} lr={args.lr}")
+    if not args.resume:
+        print("Baseline (untrained net):")
+        wr, ppg = benchmark(net, random_policy(), args.bench_games, rng)
+        print(f"  vs Random: win {100*wr:.1f}%  PPG {ppg:+.3f}")
+
+    for it in range(start_iter + 1, start_iter + args.iters + 1):
+        # Decay on the *global* iteration: restarting the schedule every chunk
+        # would keep re-injecting 20% random moves into a converged net.
         eps = max(0.02, 0.20 * (0.96 ** it))
         t0 = time.time()
         plies, loss = train_iter(net, opt, args.games, eps, args.lam, rng)
         dt = time.time() - t0
         line = f"iter {it:3d} | eps {eps:.3f} | plies {plies:5d} | loss {loss:.4f} | {dt:4.1f}s"
 
-        if it % args.bench_every == 0 or it == args.iters:
+        if it % args.bench_every == 0 or it == start_iter + args.iters:
             wr_r, ppg_r = benchmark(net, random_policy(), args.bench_games, rng)
             wr_h, ppg_h = benchmark(net, hce_policy(), args.bench_games, rng)
             line += (
@@ -238,10 +263,11 @@ def main():
                 f" | vs HCE win {100*wr_h:.1f}% PPG {ppg_h:+.2f}"
             )
             torch.save(
-                {"model": net.state_dict(), "hidden": hidden, "act": args.act, "iter": it},
+                {"model": net.state_dict(), "opt": opt.state_dict(),
+                 "hidden": hidden, "act": args.act, "iter": it},
                 MODELS_DIR / args.out,
             )
-        print(line)
+        print(line, flush=True)
 
     print(f"\nSaved checkpoint to {MODELS_DIR / args.out}")
 
