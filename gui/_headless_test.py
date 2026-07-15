@@ -1,6 +1,7 @@
 """Headless smoke test + screenshot generator for the GUI (offscreen Qt)."""
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -23,6 +24,24 @@ def resolve_opening(win):
     if getattr(win, "opening", False):
         win._open_winner = 0
         win._open_finish()
+
+
+def settle(win, timeout=25.0):
+    """Pump until the engine has finished thinking and moving.
+
+    The engine chooses on a worker thread, so nothing progresses unless the event
+    loop turns — and the checker animation is driven frame by frame here.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        QApplication.processEvents()
+        if win._anim_timer.isActive():
+            win._anim_frame()
+        elif win.human_turn or win.game_over or win.pending_double:
+            return
+        else:
+            time.sleep(0.005)
+    raise AssertionError(f"engine never finished its turn: {win.status.text()!r}")
 
 
 def finish_tumble(win):
@@ -68,11 +87,7 @@ def play_turns(win, n):
             win.view.grab()
             win.engine_play()   # skip the double check for a fast deterministic smoke
             finish_tumble(win)  # the engine rolls visibly before it moves
-            gg = 0
-            while win._anim_timer.isActive():
-                win._anim_frame()
-                gg += 1
-                assert gg < 2000
+            settle(win)         # it thinks on a worker thread, then animates
 
 
 def main():
@@ -87,6 +102,11 @@ def main():
     play_turns(win, 4)
     grab(win, "board_features.png")
     print("after play: moves", win.moves.count(), "| status", repr(win.status.text()))
+    # Both sides must actually have moved. Without this the test passed happily
+    # when the engine went async and stopped replying at all.
+    logged = [win.moves.item(i).text() for i in range(win.moves.count())]
+    assert sum("CPU" in m for m in logged) >= 3, f"engine barely moved: {logged}"
+    assert sum("You" in m for m in logged) >= 3, f"you barely moved: {logged}"
 
     # --- doubling cube mechanics ---
     win.new_game()

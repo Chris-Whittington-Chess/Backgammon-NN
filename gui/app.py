@@ -36,7 +36,10 @@ if not getattr(sys, "frozen", False):
     # In the bundle the trainer modules are packed as top-level modules already.
     sys.path.insert(0, str(ROOT / "trainer"))
 
-from PySide6.QtCore import Qt, QEventLoop, QPointF, QRectF, QSettings, QTimer
+from PySide6.QtCore import (
+    Qt, QEventLoop, QObject, QPointF, QRectF, QRunnable, QSettings, QThreadPool,
+    QTimer, Signal,
+)
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QCursor, QFont, QPainter, QPen, QPolygonF,
 )
@@ -106,6 +109,30 @@ HELP_LINES = [
     ("Cube", "Doubles the stakes. The number is the current multiplier."),
     ("Opponent", "Rollout is strongest; drop to 2/1/0-ply for an easier game."),
 ]
+
+
+class _Task(QRunnable):
+    """Runs one engine call off the UI thread.
+
+    The engine can block for the best part of a second (rollouts), which froze
+    the window solid. The Rust side releases the GIL for that work, so a worker
+    thread genuinely runs in parallel rather than just moving the stall.
+    """
+
+    class _Signals(QObject):
+        done = Signal(object, int)
+
+    def __init__(self, fn, gen):
+        super().__init__()
+        self._fn, self._gen = fn, gen
+        self.signals = self._Signals()
+
+    def run(self):
+        try:
+            result = self._fn()
+        except Exception as exc:      # deliver it; the UI thread decides what to do
+            result = exc
+        self.signals.done.emit(result, self._gen)
 
 
 class HoverButton(QPushButton):
@@ -792,6 +819,8 @@ class MainWindow(QMainWindow):
         self.score = [0, 0]          # cumulative points [you, engine]
         self.pending_double = False  # engine offered a double, awaiting take/drop
         self.combos = {}             # two-dice destinations for the held checker
+        self._tasks = []             # in-flight engine work
+        self._gen = 0               # bumped when in-flight results stop being valid
         self.new_game()
 
     @property
@@ -883,6 +912,8 @@ class MainWindow(QMainWindow):
     def new_game(self):
         self._roll_timer.stop()
         self._anim_timer.stop()
+        # Anything the engine is still thinking about belongs to the old game.
+        self._gen += 1
         self.board = bgcore.Board.starting()
         self.human_turn = True
         self.game_over = False
@@ -983,6 +1014,31 @@ class MainWindow(QMainWindow):
             self.roll = (d1, d2)
             self.refresh(f"Engine starts with {d1}-{d2}…")
             QTimer.singleShot(650, lambda: self.engine_play((d1, d2)))
+
+    def _run_async(self, fn, then):
+        """Run `fn` on a worker thread; call `then(result)` back on the UI thread.
+
+        Results from a superseded game (New Game mid-think) are dropped: `gen` is
+        bumped whenever the position they were computed for stops being current.
+        """
+        task = _Task(fn, self._gen)
+        task.signals.done.connect(self._on_task_done)
+        # Hold the task: QThreadPool deletes the runnable after run(), and the
+        # queued signal must still have its sender alive to be delivered.
+        self._tasks.append((task, then))
+        QThreadPool.globalInstance().start(task)
+
+    def _on_task_done(self, result, gen):
+        entry = next((t for t in self._tasks if t[0].signals is self.sender()), None)
+        if entry is not None:
+            self._tasks.remove(entry)
+        if gen != self._gen or self.game_over:
+            return                      # a new game started while this was thinking
+        if isinstance(result, Exception):
+            self.busy = False
+            self.refresh(f"Engine error: {result}")
+            return
+        entry[1](result)
 
     def _combo_dests(self):
         """Where the selected checker can reach using *two* dice, as
@@ -1233,13 +1289,20 @@ class MainWindow(QMainWindow):
         """Engine's turn: consider doubling, otherwise roll and play."""
         if self.game_over:
             return
-        if self.may_double(1):
-            eq = self._cube_eval(self.board)  # engine equity (rollout-based when available)
-            if should_double(eq, True):
-                self.pending_double = True
-                self.busy = True
-                self.refresh(f"Engine doubles to {self.cube_value * 2}! Take or Drop?")
-                return
+        if not self.may_double(1):
+            self.engine_play()
+            return
+        # The cube decision is a rollout too — off the UI thread with the rest.
+        board = self.board
+        self.busy = True
+        self._run_async(lambda: self._cube_eval(board), self._engine_cube_decided)
+
+    def _engine_cube_decided(self, eq):
+        if should_double(eq, True):
+            self.pending_double = True
+            self.busy = True
+            self.refresh(f"Engine doubles to {self.cube_value * 2}! Take or Drop?")
+            return
         self.engine_play()
 
     def engine_play(self, dice=None):
@@ -1268,7 +1331,13 @@ class MainWindow(QMainWindow):
         if self.game_over:
             return
         d1, d2 = self.roll
-        nxt, pts, steps, eq = self.opponent.choose(self.board, d1, d2)
+        board, engine = self.board, self.opponent
+        self.refresh(f"Engine thinking on {d1}-{d2}…")
+        self._run_async(lambda: engine.choose(board, d1, d2), self._engine_chose)
+
+    def _engine_chose(self, chosen):
+        d1, d2 = self.roll
+        nxt, pts, steps, eq = chosen
         self._engine_result = (nxt, pts, steps, eq, d1, d2)
         self._build_engine_animation(steps)
         if self._anim_queue:
