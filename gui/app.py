@@ -978,8 +978,9 @@ class MainWindow(QMainWindow):
         else:                                      # engine starts, on those dice
             self.human_turn = False
             self.busy = True
+            self.roll = (d1, d2)
             self.refresh(f"Engine starts with {d1}-{d2}…")
-            QTimer.singleShot(450, lambda: self.engine_play((d1, d2)))
+            QTimer.singleShot(650, lambda: self.engine_play((d1, d2)))
 
     def _combo_dests(self):
         """Where the selected checker can reach using *two* dice, as
@@ -1240,7 +1241,15 @@ class MainWindow(QMainWindow):
         if self.game_over:
             return
         self.busy = True
-        d1, d2 = dice if dice is not None else (self.rng.randint(1, 6), self.rng.randint(1, 6))
+        if dice is not None:
+            # The opening throw is already on the table. Tumbling it here would
+            # look exactly like the engine re-rolling dice it has already won.
+            self.roll = dice
+            self.view.dice = list(dice)
+            self.view.update()
+            self._engine_move()
+            return
+        d1, d2 = self.rng.randint(1, 6), self.rng.randint(1, 6)
         self.roll = (d1, d2)
         # Tumble first, then think: choosing can block for the best part of a
         # second (rollouts), and the dice should be seen landing before that.
