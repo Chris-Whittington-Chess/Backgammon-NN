@@ -433,17 +433,28 @@ class MainWindow(QMainWindow):
             for e in neurals:
                 self.opponents[e.name] = e
             self.evaluator = neurals[0]
-            neural1 = neurals[1]
 
         self._cube_ro = None
+        rollout = None
         if hasattr(bgcore, "Rollouts") and onnx_path.exists():
-            ro = RolloutEngine(onnx_path, movetime_ms=800, truncate_plies=9, candidates=5)
-            self.opponents[ro.name] = ro
+            rollout = RolloutEngine(onnx_path, movetime_ms=800, truncate_plies=9, candidates=5)
+            self.opponents[rollout.name] = rollout
             # Rollout evaluator for cube decisions — movetime-budgeted, no filter.
             self._cube_ro = bgcore.Rollouts(str(onnx_path), 0, 9, 0, 7, 400, 0)
         self.opponents["HCE (heuristic)"] = HceEngine()
         self.opponents["Random"] = RandomEngine()
-        self.hint_engine = neural1 or self.opponents["HCE (heuristic)"]
+
+        # Play the strongest opponent available by default: rollouts beat 2-ply
+        # search, which beats shallower search (see the Elo ladder in the README).
+        # `neurals` is ordered by depth, so its last entry is the deepest.
+        best_neural = neurals[-1] if neurals else None
+        self.default_engine = (
+            rollout or best_neural or self.opponents["HCE (heuristic)"]
+        )
+        # Hints list the *top few* moves, so they need an engine that ranks every
+        # move — RolloutEngine only ever reports the one it picked. So hints use
+        # the deepest search instead of the outright strongest engine.
+        self.hint_engine = best_neural or self.opponents["HCE (heuristic)"]
 
         self.view = BoardView(self.on_click, self.on_dice)
         self.roll_btn = QPushButton("Roll")
@@ -454,8 +465,7 @@ class MainWindow(QMainWindow):
         self.new_btn = QPushButton("New Game")
         self.opp_box = QComboBox()
         self.opp_box.addItems(list(self.opponents.keys()))
-        if self.hint_engine in self.opponents.values():
-            self.opp_box.setCurrentText(self.hint_engine.name)
+        self.opp_box.setCurrentText(self.default_engine.name)
         self.roll_btn.clicked.connect(self.on_dice)
         self.double_btn.clicked.connect(self.on_double)
         self.take_btn.clicked.connect(self.on_take)
@@ -909,6 +919,10 @@ def selftest(report_path: str) -> int:
         report["evaluator"] = type(win.evaluator).__name__ if win.evaluator else None
         report["cube_rollouts"] = win._cube_ro is not None
         report["sound"] = win.sfx.dice is not None
+        # What the opponent selector actually shows on launch — the app should
+        # come up playing its strongest engine.
+        report["default_opponent"] = win.opp_box.currentText()
+        report["hint_engine"] = win.hint_engine.name
 
         # Play a real move with the strongest neural engine that loaded.
         board = bgcore.Board.starting()

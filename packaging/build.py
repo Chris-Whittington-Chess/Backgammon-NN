@@ -103,9 +103,15 @@ def main() -> None:
         fail("no neural opponents — td.onnx did not load inside the bundle")
     if report.get("evaluator") != "NativeNeuralEngine":
         fail(f"expected the native engine, got {report.get('evaluator')}")
+    # The app should open on its strongest opponent, which is the rollout engine
+    # whenever the rollout bindings and the net are both present.
+    if not report.get("default_opponent", "").startswith("Rollout"):
+        fail(f"expected the app to default to the rollout engine, got "
+             f"{report.get('default_opponent')!r}")
 
-    for k in ("opponents", "evaluator", "engine", "best_move_31", "equity", "sound"):
-        print(f"  {k:14} {report[k]}")
+    for k in ("opponents", "default_opponent", "hint_engine", "evaluator",
+              "engine", "best_move_31", "equity", "sound"):
+        print(f"  {k:16} {report[k]}")
 
     size_mb = EXE.stat().st_size / 1e6
     print(f"\nBuild OK: {EXE.relative_to(ROOT)} ({size_mb:.1f} MB)")
