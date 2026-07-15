@@ -1396,8 +1396,10 @@ def selftest(report_path: str) -> int:
 
         if win.sfx.ok:
             win.sfx.play_dice()
+            # Look while it's still playing: the roll is only ~0.4s, so waiting
+            # much longer catches it already finished and reads as silence.
             loop = QEventLoop()
-            QTimer.singleShot(400, loop.quit)
+            QTimer.singleShot(120, loop.quit)
             loop.exec()
             report["sound_plays"] = win.sfx.is_playing()
         # What the opponent selector actually shows on launch — the app should
