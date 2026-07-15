@@ -1087,7 +1087,12 @@ class MainWindow(QMainWindow):
         self._roll_timer.stop()
         d1, d2 = self._roll_final
         self.view.dice = [d1, d2]
-        self.view.update()
+        # Paint the landed dice *now*, not when the event loop next gets a turn:
+        # `then` can block for the best part of a second (the engine choosing via
+        # rollouts), and a queued update() wouldn't run until after it — leaving
+        # the last tumble frame on screen looking like the roll, then flicking to
+        # the real one as the engine moves.
+        self.view.repaint()
         self._roll_then()
 
     def _begin_human_roll(self, d1, d2, lead="Rolled"):
