@@ -1,5 +1,10 @@
 # Backgammon-NN
 
+**[whittingtonchess.com/backgammon](https://whittingtonchess.com/backgammon)** —
+project page, with the story of how it was built · **[Development
+report](https://whittingtonchess.com/backgammon-report)** · **[Download the
+app](../../releases/latest)**
+
 A self-learning backgammon engine with a neural-network evaluator. The engine
 core is Rust (fast, validated move generation); training is PyTorch
 (TD/Monte-Carlo self-play); inference runs natively in Rust via ONNX; and there
