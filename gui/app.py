@@ -37,7 +37,9 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(ROOT / "trainer"))
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QPainter, QPen, QPolygonF
+from PySide6.QtGui import (
+    QAction, QBrush, QColor, QCursor, QFont, QPainter, QPen, QPolygonF,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -77,10 +79,14 @@ DEST_FILL = QColor(70, 220, 120, 150)
 
 
 class BoardView(QWidget):
-    def __init__(self, on_click, on_dice):
+    def __init__(self, on_click, on_dice, on_action=None):
         super().__init__()
         self.on_click, self.on_dice = on_click, on_dice
+        self.on_action = on_action or (lambda key: None)
         self.setMinimumSize(760, 560)
+        # Hover boxes appear without a button held down, so we need move events
+        # delivered whenever the cursor is over the board.
+        self.setMouseTracking(True)
         self.board = bgcore.Board.starting()
         self.dice: list[int] = []
         self.source_points: set[int] = set()
@@ -94,6 +100,9 @@ class BoardView(QWidget):
         self.wink_on = True                    # current pulse phase
         self.opening = False                   # showing the opening-roll dice
         self.open_dice = None                  # (your_die, engine_die)
+        self.open_resolved = False             # False while the dice wind
+        self.can_double = False                # you may offer a double right now
+        self.hover_zone = None                 # "dice" | "cube" — which hover boxes show
         self._geom = None
 
     # --- geometry ---
@@ -112,11 +121,24 @@ class BoardView(QWidget):
         xL += [bar_x1 + c * pw for c in range(6)]
         off_x0 = xL[11] + pw
         s = min(46, pw)
-        dice_rect = QRectF(W * 0.70 - (s + 6), H / 2 - s / 2, 2 * s + 12, s)
+        # The opening roll spreads the two dice apart (one each); keep the hit
+        # area in step with what's drawn so the whole group stays clickable.
+        spread = 2 * s + (34 if (self.opening and self.open_dice) else 12)
+        dice_rect = QRectF(W * 0.70 - spread / 2, H / 2 - s / 2, spread, s)
+        # The cube sits at the left edge, and moves to the owner's side.
+        cr = r * 1.4
+        cx = margin + pw * 0.5
+        if self.cube_owner == 1:      # engine owns -> top
+            cy = margin + ph + cr + 6
+        elif self.cube_owner == 0:    # you own -> bottom
+            cy = H - margin - ph - cr - 6
+        else:                         # centered
+            cy = H / 2
         return {
             "W": W, "H": H, "margin": margin, "pw": pw, "ph": ph, "r": r,
             "xL": xL, "bar": (bar_x0, bar_x1), "off": (off_x0, off_x0 + off_w),
             "dice_rect": dice_rect, "dice_s": s,
+            "cube_rect": QRectF(cx - cr, cy - cr, 2 * cr, 2 * cr),
         }
 
     def _col_row(self, point):
@@ -181,6 +203,7 @@ class BoardView(QWidget):
         if self.floating:
             x, y, human = self.floating
             self._disc(p, x, y, g["r"], human)
+        self._draw_hover(p, g)   # last — the boxes overlay the board
         p.end()
 
     def _disc(self, p, cx, cy, r, human, label=None):
@@ -240,24 +263,18 @@ class BoardView(QWidget):
             p.drawRect(QRectF(ox0, g["H"] / 2, ox1 - ox0, g["H"] / 2 - g["margin"]))
 
     def _draw_cube(self, p, g):
-        r = g["r"] * 1.4
-        x = g["margin"] + g["pw"] * 0.5
-        if self.cube_owner == 1:      # engine owns -> top
-            y = g["margin"] + g["ph"] + r + 6
-        elif self.cube_owner == 0:    # you own -> bottom
-            y = g["H"] - g["margin"] - g["ph"] - r - 6
-        else:                          # centered
-            y = g["H"] / 2
+        box = g["cube_rect"]
+        r = box.width() / 2
         p.setBrush(QBrush(QColor("#f5f0e1")))
         p.setPen(QPen(QColor("#2b2b2b"), 2))
-        p.drawRoundedRect(QRectF(x - r, y - r, 2 * r, 2 * r), 6, 6)
+        p.drawRoundedRect(box, 6, 6)
         p.setPen(QPen(QColor("#222")))
         p.setFont(QFont("Arial", int(r * 0.85), QFont.Bold))
-        p.drawText(QRectF(x - r, y - r, 2 * r, 2 * r), Qt.AlignCenter, str(self.cube_value))
+        p.drawText(box, Qt.AlignCenter, str(self.cube_value))
         if self.wink_cube and self.wink_on:    # pulse ring when the engine doubles
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(SRC_RING, 4))
-            p.drawRoundedRect(QRectF(x - r - 5, y - r - 5, 2 * r + 10, 2 * r + 10), 9, 9)
+            p.drawRoundedRect(box.adjusted(-5, -5, 5, 5), 9, 9)
 
     def _pip_face(self, p, x, y, s, value, face=None, border=None):
         p.setBrush(QBrush(face if face is not None else QColor("#fafafa")))
@@ -292,10 +309,14 @@ class BoardView(QWidget):
             p.drawText(QRectF(x, y - 22, s, 18), Qt.AlignCenter, "You")
             p.setPen(QPen(QColor("#e6a6a0")))
             p.drawText(QRectF(xe, y - 22, s, 18), Qt.AlignCenter, "Engine")
-            win_x = x if d_you > d_eng else xe      # ring the higher die (starts)
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(SRC_RING, 3))
-            p.drawRoundedRect(QRectF(win_x - 4, y - 4, s + 8, s + 8), 8, 8)
+            if self.open_resolved:
+                win_x = x if d_you > d_eng else xe  # ring the higher die (starts)
+                p.setPen(QPen(SRC_RING, 3))
+                p.drawRoundedRect(QRectF(win_x - 4, y - 4, s + 8, s + 8), 8, 8)
+            elif self.wink_on:                      # still winding — pulse both
+                p.setPen(QPen(SRC_RING, 3))
+                p.drawRoundedRect(QRectF(x - 10, y - 10, (xe - x) + s + 20, s + 20), 10, 10)
             return
         if self.dice:
             total = len(self.dice) * s + (len(self.dice) - 1) * gap
@@ -326,6 +347,77 @@ class BoardView(QWidget):
         p.drawText(QRectF(g["W"] * 0.10, g["margin"] + 2, 220, 20),
                    Qt.AlignLeft, f"Engine: {self.board.pip_count(1)} pips")
 
+    # --- hover boxes ---
+    # Anything the board wants you to click pulses; hovering it spells out what
+    # the click will do, as small boxes that vanish when you move away.
+    def _zone_actions(self, zone):
+        """The (label, key) buttons a zone offers right now — empty if none."""
+        if zone == "dice":
+            if self.opening:
+                # The opening dice are winding; any click rolls them, so a box
+                # offering a second click would only get in the way.
+                return []
+            if self.wink_dice:                 # your turn, nothing rolled yet
+                return [("Roll dice", "roll")]
+        elif zone == "cube":
+            if self.wink_cube:                 # engine doubled — you must answer
+                return [("Accept", "accept"), ("Fold", "fold")]
+            if self.can_double:
+                return [("Double", "double")]
+        return []
+
+    def _zone_anchor(self, zone, g):
+        return g["dice_rect"] if zone == "dice" else g["cube_rect"]
+
+    def _zone_boxes(self, zone, g):
+        """[(rect, label, key)] laid out beside the zone's anchor."""
+        acts = self._zone_actions(zone)
+        if not acts:
+            return []
+        w, h, gap = 92.0, 28.0, 6.0
+        anchor = self._zone_anchor(zone, g)
+        out = []
+        if zone == "dice":                     # below the dice, side by side
+            total = len(acts) * w + (len(acts) - 1) * gap
+            x = anchor.center().x() - total / 2
+            y = anchor.bottom() + 12
+            for label, key in acts:
+                out.append((QRectF(x, y, w, h), label, key))
+                x += w + gap
+        else:                                  # cube hugs the left edge -> stack right
+            x = anchor.right() + 10
+            total = len(acts) * h + (len(acts) - 1) * gap
+            y = anchor.center().y() - total / 2
+            for label, key in acts:
+                out.append((QRectF(x, y, w, h), label, key))
+                y += h + gap
+        return out
+
+    def _zone_at(self, pos):
+        """Which zone the cursor is in — counting its boxes, so moving onto a box
+        doesn't dismiss the very box you're reaching for."""
+        g = self._geom
+        if g is None:
+            return None
+        for zone in ("cube", "dice"):
+            if not self._zone_actions(zone):
+                continue
+            hot = [self._zone_anchor(zone, g)] + [r for r, _, _ in self._zone_boxes(zone, g)]
+            if any(r.adjusted(-8, -8, 8, 8).contains(pos) for r in hot):
+                return zone
+        return None
+
+    def _draw_hover(self, p, g):
+        if self.hover_zone is None:
+            return
+        p.setFont(QFont("Arial", 10, QFont.Bold))
+        for rect, label, _key in self._zone_boxes(self.hover_zone, g):
+            p.setBrush(QBrush(QColor(20, 20, 20, 225)))
+            p.setPen(QPen(SRC_RING, 2))
+            p.drawRoundedRect(rect, 6, 6)
+            p.setPen(QPen(QColor("#f7f2e2")))
+            p.drawText(rect, Qt.AlignCenter, label)
+
     # --- interaction ---
     def hit_test(self, x, y):
         g = self._geom
@@ -343,16 +435,34 @@ class BoardView(QWidget):
                 return (c + 13) if y < H / 2 else (12 - c)
         return None
 
+    def _set_hover(self, zone):
+        if zone != self.hover_zone:
+            self.hover_zone = zone
+            self.update()
+
+    def mouseMoveEvent(self, ev):
+        self._set_hover(self._zone_at(ev.position()))
+
+    def leaveEvent(self, ev):
+        self._set_hover(None)
+
     def mousePressEvent(self, ev):
-        x, y = ev.position().x(), ev.position().y()
+        pos = ev.position()
         if ev.button() == Qt.RightButton:
             self.on_click(None, "right")
             return
         g = self._geom
-        if g is not None and g["dice_rect"].contains(QPointF(x, y)):
+        # A visible hover box wins the click — it sits over the board.
+        if g is not None and self.hover_zone is not None:
+            for rect, _label, key in self._zone_boxes(self.hover_zone, g):
+                if rect.contains(pos):
+                    self._set_hover(None)
+                    self.on_action(key)
+                    return
+        if g is not None and g["dice_rect"].contains(pos):
             self.on_dice()
             return
-        self.on_click(self.hit_test(x, y), "left")
+        self.on_click(self.hit_test(pos.x(), pos.y()), "left")
 
 
 class EvalBar(QWidget):
@@ -402,10 +512,14 @@ class MainWindow(QMainWindow):
         new_act = QAction("&New Game", self)
         new_act.setShortcut("Ctrl+N")
         new_act.triggered.connect(self.new_game)
+        undo_act = QAction("&Undo move", self)
+        undo_act.setShortcut("Ctrl+Z")
+        undo_act.triggered.connect(self.undo_submove)
         quit_act = QAction("&Quit", self)
         quit_act.setShortcut("Ctrl+Q")
         quit_act.triggered.connect(self.close)
         file_menu.addAction(new_act)
+        file_menu.addAction(undo_act)
         file_menu.addSeparator()
         file_menu.addAction(quit_act)
 
@@ -456,11 +570,13 @@ class MainWindow(QMainWindow):
         # the deepest search instead of the outright strongest engine.
         self.hint_engine = best_neural or self.opponents["HCE (heuristic)"]
 
-        self.view = BoardView(self.on_click, self.on_dice)
+        self.view = BoardView(self.on_click, self.on_dice, self.on_hover_action)
         self.roll_btn = QPushButton("Roll")
         self.double_btn = QPushButton("Double")
         self.take_btn = QPushButton("Take")
         self.drop_btn = QPushButton("Drop")
+        self.undo_btn = QPushButton("Undo")
+        self.undo_btn.setToolTip("Take back the last checker you moved (Ctrl+Z)")
         self.hint_btn = QPushButton("Hint")
         self.new_btn = QPushButton("New Game")
         self.opp_box = QComboBox()
@@ -470,6 +586,7 @@ class MainWindow(QMainWindow):
         self.double_btn.clicked.connect(self.on_double)
         self.take_btn.clicked.connect(self.on_take)
         self.drop_btn.clicked.connect(self.on_drop)
+        self.undo_btn.clicked.connect(self.undo_submove)
         self.hint_btn.clicked.connect(self.on_hint)
         self.new_btn.clicked.connect(self.new_game)
         self.take_btn.setVisible(False)
@@ -480,7 +597,8 @@ class MainWindow(QMainWindow):
 
         controls = QHBoxLayout()
         for w in (self.roll_btn, self.double_btn, self.take_btn, self.drop_btn,
-                  self.hint_btn, self.new_btn, QLabel("Opponent:"), self.opp_box):
+                  self.undo_btn, self.hint_btn, self.new_btn,
+                  QLabel("Opponent:"), self.opp_box):
             controls.addWidget(w)
         controls.addStretch(1)
         controls.addWidget(self.score_label)
@@ -514,6 +632,10 @@ class MainWindow(QMainWindow):
         self._wink_timer = QTimer(self)
         self._wink_timer.setInterval(430)
         self._wink_timer.timeout.connect(self._wink_tick)
+        # Opening dice wind through 1-6 once a second until you click to roll.
+        self._open_timer = QTimer(self)
+        self._open_timer.setInterval(1000 // 6)
+        self._open_timer.timeout.connect(self._open_tick)
         self.busy = False
         self.score = [0, 0]          # cumulative points [you, engine]
         self.pending_double = False  # engine offered a double, awaiting take/drop
@@ -565,7 +687,9 @@ class MainWindow(QMainWindow):
         self.view.cube_value = self.cube_value
         self.view.cube_owner = self.cube_owner
         self.view.opening = self.opening
+        # While the opening dice wind, _open_tick owns the faces — don't fight it.
         self.view.open_dice = self._open if self.opening else None
+        self.view.open_resolved = self.opening and self.open_resolved
         if message is not None:
             self.status.setText(message)
         ready = (self.human_turn and not self.remaining and not self.game_over
@@ -574,19 +698,26 @@ class MainWindow(QMainWindow):
         self.double_btn.setEnabled(ready and not self.pending_double and self.may_double(0))
         self.take_btn.setVisible(self.pending_double)
         self.drop_btn.setVisible(self.pending_double)
+        self.undo_btn.setEnabled(
+            bool(self.undo_stack) and self.human_turn and not self.busy and not self.game_over)
         self.hint_btn.setEnabled(
             self.human_turn and bool(self.remaining) and self.full_roll and not self.game_over)
         self.score_label.setText(f"You {self.score[0]} — {self.score[1]} Engine")
         self.eval_bar.set_value(self._win_prob())
         self.view.wink_dice = roll_time
         self.view.wink_cube = self.pending_double
-        if self.view.wink_dice or self.view.wink_cube:
+        self.view.can_double = ready and not self.pending_double and self.may_double(0)
+        # The opening dice pulse too, until they're clicked.
+        if self.view.wink_dice or self.view.wink_cube or self.opening:
             if not self._wink_timer.isActive():
                 self.view.wink_on = True
                 self._wink_timer.start()
         elif self._wink_timer.isActive():
             self._wink_timer.stop()
             self.view.wink_on = True
+        # Whatever the cursor sits on may now offer different actions.
+        self.view.hover_zone = self.view._zone_at(
+            self.view.mapFromGlobal(QCursor.pos()).toPointF())
         self.view.update()
 
     # --- game flow ---
@@ -603,6 +734,7 @@ class MainWindow(QMainWindow):
         self.carrying = None
         self.full_roll = False
         self.human_steps = []
+        self.undo_stack = []
         self.moves.clear()
         self.turn_no = 1
         self.cube_value = 1
@@ -610,26 +742,58 @@ class MainWindow(QMainWindow):
         self.pending_double = False
         self.take_btn.setVisible(False)
         self.drop_btn.setVisible(False)
-        # Opening roll — one die each; the higher die starts.
+        # Opening roll — one die each, the higher starts. The dice wind through
+        # 1-6 until you click them; the click is what actually rolls.
+        self.opening = True
+        self.open_resolved = False
+        self._open = (1, 4)
+        self._open_winner = None
+        self._open_k = 0
+        self.view.opening = True
+        self.view.open_resolved = False
+        self.view.open_dice = self._open
+        self._open_timer.start()
+        self.refresh("Click the dice to roll for who starts.")
+
+    def _open_tick(self):
+        """Wind both dice through 1-6 while we wait for the click."""
+        self._open_k += 1
+        k = self._open_k
+        # Offset the two dice so they don't march in lockstep.
+        self._open = ((k % 6) + 1, ((k + 3) % 6) + 1)
+        self.view.open_dice = self._open
+        self.view.update()
+
+    def _open_roll(self):
+        """The click that rolls: stop winding, settle on a real roll, then start
+        the game once it's been seen."""
+        if not self.opening or self.open_resolved:
+            return
+        self._open_timer.stop()
         while True:
             d_you, d_eng = self.rng.randint(1, 6), self.rng.randint(1, 6)
             if d_you != d_eng:
                 break
         self._open = (d_you, d_eng)
         self._open_winner = 0 if d_you > d_eng else 1
-        self.opening = True
-        self.view.opening = True
-        self.view.open_dice = (d_you, d_eng)
+        self.open_resolved = True
+        self.view.open_resolved = True
+        self.view.open_dice = self._open
+        self.sfx.play_dice()
         starter = "You" if self._open_winner == 0 else "Engine"
-        self.refresh(f"Opening roll — You {d_you}, Engine {d_eng}. {starter} start "
-                     f"(click to continue).")
-        QTimer.singleShot(1500, self._open_finish)
+        self.refresh(f"Opening roll — You {d_you}, Engine {d_eng}. {starter} start.")
+        QTimer.singleShot(1100, self._open_finish)
 
     def _open_finish(self):
         if not self.opening:
             return
+        self._open_timer.stop()
+        if self._open_winner is None:   # forced past without rolling (tests)
+            self._open_winner = 0
         self.opening = False
+        self.open_resolved = False
         self.view.opening = False
+        self.view.open_resolved = False
         self.view.open_dice = None
         if self._open_winner == 0:                 # you start — roll your turn
             self.human_turn = True
@@ -647,9 +811,33 @@ class MainWindow(QMainWindow):
         return (not self.game_over and self.cube_value < 64
                 and self.cube_owner in (None, side))
 
+    def undo_submove(self):
+        """Take back the last checker you moved this turn, restoring its die.
+
+        Only within your own turn: once the turn commits the engine has replied
+        and there's nothing to take back to.
+        """
+        if not self.undo_stack or not self.human_turn or self.busy or self.game_over:
+            return
+        self.board, self.remaining, self.human_steps, self.full_roll = self.undo_stack.pop()
+        self.carrying = None
+        self.subs = bgcore.submoves(self.board, self.remaining)
+        left = len(self.undo_stack)
+        self.refresh("Took back a checker."
+                     + ("" if left else " Back to the start of your turn."))
+
+    def on_hover_action(self, key):
+        """A hover box on the board was clicked — same actions as the buttons."""
+        {
+            "roll": self.on_dice,
+            "double": self.on_double,
+            "accept": self.on_take,
+            "fold": self.on_drop,
+        }[key]()
+
     def on_dice(self):
-        if self.opening:                # click past the opening roll
-            self._open_finish()
+        if self.opening:                # the click that rolls for who starts
+            self._open_roll()
             return
         if not (self.human_turn and not self.remaining and not self.game_over and not self.busy):
             return
@@ -683,8 +871,8 @@ class MainWindow(QMainWindow):
         self.refresh(f"Rolled {d1}-{d2}. Click a checker, then its destination.")
 
     def on_click(self, pid, button):
-        if self.opening:                # click past the opening roll
-            self._open_finish()
+        if self.opening:                # any click on the board rolls
+            self._open_roll()
             return
         if not self.human_turn or self.game_over or self.busy or not self.remaining:
             return
@@ -715,6 +903,10 @@ class MainWindow(QMainWindow):
 
     def apply_submove(self, sub):
         frm, to, die, result = sub
+        # Snapshot first, so Undo can put this checker back. Boards are
+        # immutable, and the lists are small — a plain stack is enough.
+        self.undo_stack.append(
+            (self.board, list(self.remaining), list(self.human_steps), self.full_roll))
         self.board = result
         self.remaining.remove(die)
         self.full_roll = False
@@ -736,6 +928,9 @@ class MainWindow(QMainWindow):
         if self.human_steps:
             eq = -self._pos_eval(self.board.swap_perspective())
             self._log_move("You", self.roll, self.human_steps, eq)
+        # The turn is committed and the engine is about to reply — past here
+        # there's nothing to take back to.
+        self.undo_stack.clear()
         self.human_turn = False
         self.board = self.board.swap_perspective()
         self.remaining = []
@@ -946,7 +1141,8 @@ def main():
         sys.exit(selftest(sys.argv[2]))
     app = QApplication(sys.argv)
     win = MainWindow()
-    win.resize(1080, 700)
+    # Wide enough for the move list to show each move's equity without clipping.
+    win.resize(1220, 720)
     win.show()
     sys.exit(app.exec())
 
