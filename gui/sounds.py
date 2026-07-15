@@ -70,8 +70,9 @@ def ensure_assets():
 class Sfx:
     """Loads and plays the effects; degrades gracefully without audio."""
 
-    def __init__(self):
+    def __init__(self, volume: float = 0.7):
         self.dice = self.place = None
+        self._volume = volume
         try:
             from PySide6.QtCore import QUrl
             from PySide6.QtMultimedia import QSoundEffect
@@ -81,12 +82,27 @@ class Sfx:
             self.dice.setSource(QUrl.fromLocalFile(str(dice_path)))
             self.place = QSoundEffect()
             self.place.setSource(QUrl.fromLocalFile(str(place_path)))
+            self.set_volume(volume)
         except Exception:
             self.dice = self.place = None
 
+    @property
+    def volume(self) -> float:
+        return self._volume
+
+    def set_volume(self, v: float) -> None:
+        """Set playback volume, 0.0 (muted) to 1.0."""
+        self._volume = max(0.0, min(1.0, float(v)))
+        for eff in (self.dice, self.place):
+            try:
+                if eff is not None:
+                    eff.setVolume(self._volume)
+            except Exception:
+                pass
+
     def _play(self, eff):
         try:
-            if eff is not None:
+            if eff is not None and self._volume > 0.0:
                 eff.play()
         except Exception:
             pass

@@ -36,7 +36,7 @@ if not getattr(sys, "frozen", False):
     # In the bundle the trainer modules are packed as top-level modules already.
     sys.path.insert(0, str(ROOT / "trainer"))
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
+from PySide6.QtCore import Qt, QPointF, QRectF, QSettings, QTimer
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QCursor, QFont, QPainter, QPen, QPolygonF,
 )
@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QPushButton,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -506,7 +507,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Backgammon — bgcore")
-        self.sfx = Sfx()
+        # Volume persists between sessions — nobody wants to re-mute every launch.
+        self.settings = QSettings("ChrisWhittington", "Backgammon-NN")
+        vol = float(self.settings.value("sound/volume", 0.7))
+        self.sfx = Sfx(vol)
 
         file_menu = self.menuBar().addMenu("&File")
         new_act = QAction("&New Game", self)
@@ -595,13 +599,25 @@ class MainWindow(QMainWindow):
         self.score_label = QLabel("You 0 — 0 Engine")
         self.score_label.setStyleSheet("font-weight:bold; padding:0 8px;")
 
+        self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setValue(int(self.sfx.volume * 100))
+        self.vol_slider.setFixedWidth(90)
+        self.vol_slider.setToolTip("Sound effects volume (0 = silent)")
+        self.vol_slider.valueChanged.connect(self.on_volume)
+        self.vol_label = QLabel()
+        self.vol_label.setToolTip("Sound effects volume (0 = silent)")
+
         controls = QHBoxLayout()
         for w in (self.roll_btn, self.double_btn, self.take_btn, self.drop_btn,
                   self.undo_btn, self.hint_btn, self.new_btn,
                   QLabel("Opponent:"), self.opp_box):
             controls.addWidget(w)
         controls.addStretch(1)
+        controls.addWidget(self.vol_label)
+        controls.addWidget(self.vol_slider)
         controls.addWidget(self.score_label)
+        self._sync_vol_label()
 
         self.moves = QListWidget()
         self.moves.setFixedWidth(230)
@@ -810,6 +826,14 @@ class MainWindow(QMainWindow):
     def may_double(self, side):
         return (not self.game_over and self.cube_value < 64
                 and self.cube_owner in (None, side))
+
+    def _sync_vol_label(self):
+        self.vol_label.setText("🔇" if self.sfx.volume <= 0 else "🔊")
+
+    def on_volume(self, pct):
+        self.sfx.set_volume(pct / 100.0)
+        self.settings.setValue("sound/volume", self.sfx.volume)
+        self._sync_vol_label()
 
     def undo_submove(self):
         """Take back the last checker you moved this turn, restoring its die.
