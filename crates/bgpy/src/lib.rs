@@ -226,6 +226,66 @@ fn hce_move(board: &PyBoard, d1: u8, d2: u8) -> PyBoard {
     PyBoard { inner: mv.result }
 }
 
+/// Neural evaluator with n-ply search, run natively in Rust (requires the `onnx`
+/// build feature). Loads an exported ONNX net once.
+///
+/// This is the torch-free play path: the packaged app ships this `.pyd` (which
+/// embeds the ONNX runtime) plus `td.onnx`, and needs neither PyTorch nor
+/// onnxruntime. It is also far faster than searching from Python — the whole
+/// search runs in Rust instead of crossing the FFI boundary per position.
+#[cfg(feature = "onnx")]
+#[pyclass]
+struct Neural {
+    nn: bgengine::eval::NnEval,
+    lookahead: u8,
+    candidates: usize,
+}
+
+#[cfg(feature = "onnx")]
+#[pymethods]
+impl Neural {
+    /// `lookahead` is the search depth in half-moves (0 = static eval).
+    /// `candidates` bounds the branching of 2-ply+ search; 0 = full width.
+    #[new]
+    #[pyo3(signature = (onnx_path, lookahead = 0, candidates = 0))]
+    fn new(onnx_path: &str, lookahead: u8, candidates: usize) -> PyResult<Self> {
+        let nn = bgengine::eval::NnEval::from_path(onnx_path).map_err(PyValueError::new_err)?;
+        Ok(Neural { nn, lookahead, candidates })
+    }
+
+    /// Static (0-ply) net equity for the side to move.
+    fn equity(&self, board: &PyBoard) -> f32 {
+        self.nn.evaluate(&board.inner).equity()
+    }
+
+    /// Net P(win) for the side to move.
+    fn win_prob(&self, board: &PyBoard) -> f32 {
+        self.nn.evaluate(&board.inner).win
+    }
+
+    /// The net's five outputs for the side to move:
+    /// `[win, win_g, win_bg, lose_g, lose_bg]`.
+    fn dist(&self, board: &PyBoard) -> Vec<f32> {
+        let v = self.nn.evaluate(&board.inner);
+        vec![v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg]
+    }
+
+    /// Equity of each legal move for `d1, d2` from the mover's perspective,
+    /// aligned index-for-index with [`legal_moves`]. Releases the GIL: a 2-ply
+    /// search takes a fair fraction of a second and the GUI stays responsive.
+    fn scores(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8) -> Vec<f32> {
+        py.allow_threads(|| {
+            bgengine::score_moves(
+                &board.inner,
+                &Dice::new(d1, d2),
+                self.lookahead,
+                self.candidates,
+                &self.nn,
+            )
+        })
+    }
+}
+
 /// Parallel Monte-Carlo rollout engine (requires the `onnx` build feature).
 /// Loads an exported ONNX net once and rolls out positions natively in Rust.
 #[cfg(feature = "onnx")]
@@ -296,6 +356,8 @@ impl Rollouts {
 
 #[pymodule]
 fn bgcore(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(feature = "onnx")]
+    m.add_class::<Neural>()?;
     #[cfg(feature = "onnx")]
     m.add_class::<Rollouts>()?;
     m.add_class::<PyBoard>()?;

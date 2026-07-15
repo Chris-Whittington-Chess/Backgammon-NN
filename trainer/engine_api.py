@@ -94,6 +94,47 @@ class RolloutEngine(BaseEngine):
         return [(steps, chosen, eq)]
 
 
+class NativeNeuralEngine(BaseEngine):
+    """Neural evaluator with n-ply search, run natively in Rust (`bgcore.Neural`,
+    which needs the onnx-feature bindings).
+
+    Same net and same search as `NeuralEngine`, but it loads the exported
+    `.onnx` instead of a torch checkpoint and searches in Rust — several times
+    faster, and with no PyTorch/numpy dependency. This is the engine the packaged
+    standalone app ships; `NeuralEngine` remains the trainer-side path, where the
+    torch net is already in memory.
+    """
+
+    # Bound the branching of 2-ply+ search (0 = full width, fine for 0/1-ply).
+    CANDIDATES = 4
+
+    def __init__(self, onnx_path, lookahead: int = 0, candidates: int | None = None):
+        if candidates is None:
+            candidates = self.CANDIDATES if lookahead >= 2 else 0
+        self._nn = bgcore.Neural(str(onnx_path), lookahead, candidates)
+        self.lookahead = lookahead
+        self.name = f"Neural — {lookahead}-ply"
+
+    def static_equity(self, board) -> float:
+        """Net equity for the side to move at a single position (0-ply)."""
+        return float(self._nn.equity(board))
+
+    def win_prob(self, board) -> float:
+        """Net win probability P(win) for the side to move at `board`."""
+        return float(self._nn.win_prob(board))
+
+    def dist(self, board):
+        """Net outcome distribution `[win, win_g, win_bg, lose_g, lose_bg]`."""
+        return [float(x) for x in self._nn.dist(board)]
+
+    def analyze(self, board, d1, d2):
+        scores = self._nn.scores(board, d1, d2)
+        moves = bgcore.legal_moves_with_steps(board, d1, d2)
+        scored = [(s, r, float(eq)) for (s, r), eq in zip(moves, scores)]
+        scored.sort(key=lambda t: -t[2])
+        return scored
+
+
 class NeuralEngine(BaseEngine):
     """Neural evaluator with optional 1-ply search.
 

@@ -11,15 +11,33 @@ use crate::board::Board;
 use crate::dice::Dice;
 use crate::eval::Evaluator;
 use crate::game::{result, Engine, GameResult};
-use crate::moves::genmoves;
+use crate::moves::{genmoves, Move};
 
-/// Static (0-ply) value of a resulting position `r` to the side that just moved:
-/// its points if the move wins outright, else the negated opponent equity.
-fn shallow<E: Evaluator>(r: &Board, eval: &E) -> f32 {
-    match result(r) {
-        GameResult::MoverWins(p) => p as f32,
-        _ => -eval.evaluate(&r.swap_perspective()).equity(),
+/// Static (0-ply) value of each move's result to the side that just moved: its
+/// points if the move wins outright, else the negated opponent equity.
+///
+/// The non-terminal results are scored in a single batched forward pass. This is
+/// the search's hot path — every chance node scores all its legal moves — and one
+/// `[n, 198]` matmul beats `n` `[1, 198]` ones by enough to dominate the search's
+/// runtime.
+fn shallow_all<E: Evaluator>(moves: &[Move], eval: &E) -> Vec<f32> {
+    let mut out = vec![0.0f32; moves.len()];
+    let mut pending = Vec::with_capacity(moves.len());
+    let mut at = Vec::with_capacity(moves.len());
+    for (i, m) in moves.iter().enumerate() {
+        match result(&m.result) {
+            // A won position needs no net evaluation.
+            GameResult::MoverWins(p) => out[i] = p as f32,
+            _ => {
+                at.push(i);
+                pending.push(m.result.swap_perspective());
+            }
+        }
     }
+    for (k, v) in eval.evaluate_batch(&pending).into_iter().enumerate() {
+        out[at[k]] = -v.equity();
+    }
+    out
 }
 
 /// Expected equity for the side to move at `board`, searching `depth` half-moves
@@ -45,16 +63,24 @@ fn pv<E: Evaluator>(board: &Board, depth: u8, eval: &E, candidates: usize) -> f3
         for c in a..=6u8 {
             let weight = if a == c { 1.0 / 36.0 } else { 2.0 / 36.0 };
             let mut moves = genmoves(board, &Dice::new(a, c));
+            let vals = shallow_all(&moves, eval);
+
+            // At the last ply a move's static value *is* its searched value, so
+            // the batched pass above already answered this chance node.
+            if depth == 1 {
+                total += weight * vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                continue;
+            }
 
             // Prune only where it pays: below the last ply the deep search per
             // move is expensive, so keep just the best `candidates`.
-            if depth > 1 && candidates > 0 && moves.len() > candidates {
-                moves.sort_by(|x, y| {
-                    shallow(&y.result, eval)
-                        .partial_cmp(&shallow(&x.result, eval))
-                        .unwrap()
-                });
-                moves.truncate(candidates);
+            if candidates > 0 && moves.len() > candidates {
+                let mut idx: Vec<usize> = (0..moves.len()).collect();
+                idx.sort_by(|&i, &j| vals[j].partial_cmp(&vals[i]).unwrap());
+                idx.truncate(candidates);
+                idx.sort_unstable();
+                let mut keep = idx.iter().map(|&i| moves[i].clone()).collect();
+                std::mem::swap(&mut moves, &mut keep);
             }
 
             let mut best = f32::NEG_INFINITY;
@@ -71,6 +97,44 @@ fn pv<E: Evaluator>(board: &Board, depth: u8, eval: &E, candidates: usize) -> f3
         }
     }
     total
+}
+
+/// Equity of every legal move for `dice`, from the mover's perspective, in
+/// [`genmoves`] order — the ranked list a GUI needs (best move, hints, and the
+/// cost of the alternatives), not just the single pick [`SearchEngine::choose`]
+/// returns.
+///
+/// Moves are searched `depth` half-moves deep. At `depth >= 2` only the best
+/// `candidates` (by static value) are searched deeply; the rest keep their static
+/// value, which is enough to rank also-rans for display. Note this means the
+/// argmax here can differ from `choose`, which only ever considers its candidate
+/// set — a pruned move's *static* value can top the candidates' *deep* values.
+/// `choose` remains the engine's move for play and benchmarks.
+pub fn score_moves<E: Evaluator>(
+    board: &Board,
+    dice: &Dice,
+    depth: u8,
+    candidates: usize,
+    eval: &E,
+) -> Vec<f32> {
+    let moves = genmoves(board, dice);
+    let mut scores = shallow_all(&moves, eval);
+    if depth == 0 {
+        return scores;
+    }
+
+    let mut order: Vec<usize> = (0..moves.len()).collect();
+    if depth >= 2 && candidates > 0 && moves.len() > candidates {
+        order.sort_by(|&i, &j| scores[j].partial_cmp(&scores[i]).unwrap());
+        order.truncate(candidates);
+    }
+    for &i in &order {
+        scores[i] = match result(&moves[i].result) {
+            GameResult::MoverWins(p) => p as f32,
+            _ => -pv(&moves[i].result.swap_perspective(), depth, eval, candidates),
+        };
+    }
+    scores
 }
 
 /// An [`Engine`] that picks its move by `lookahead`-ply search. `candidates`
@@ -105,12 +169,9 @@ impl<E: Evaluator> Engine for SearchEngine<E> {
             && self.candidates > 0
             && moves.len() > self.candidates
         {
+            let vals = shallow_all(&moves, &self.eval);
             let mut idx: Vec<usize> = (0..moves.len()).collect();
-            idx.sort_by(|&i, &j| {
-                shallow(&moves[j].result, &self.eval)
-                    .partial_cmp(&shallow(&moves[i].result, &self.eval))
-                    .unwrap()
-            });
+            idx.sort_by(|&i, &j| vals[j].partial_cmp(&vals[i]).unwrap());
             idx.truncate(self.candidates);
             idx
         } else {
@@ -163,5 +224,75 @@ mod tests {
         // Candidate-pruned 2-ply should produce a finite value quickly.
         let v = pv(&Board::starting_position(), 2, &HceEval::new(), 4);
         assert!(v.is_finite() && v.abs() <= 3.0);
+    }
+
+    /// First index holding the maximum — the same tie-break `choose` uses (it
+    /// keeps the incumbent on `v > best`). HCE is a pip-race eval, so distinct
+    /// moves using the same pips tie exactly and the tie-break decides.
+    fn argmax(v: &[f32]) -> usize {
+        let mut best = 0;
+        for i in 1..v.len() {
+            if v[i] > v[best] {
+                best = i;
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn score_moves_scores_every_move() {
+        let b = Board::starting_position();
+        let d = Dice::new(3, 1);
+        let hce = HceEval::new();
+        for depth in [0u8, 1, 2] {
+            let s = score_moves(&b, &d, depth, 4, &hce);
+            assert_eq!(s.len(), genmoves(&b, &d).len(), "depth {depth}");
+            assert!(s.iter().all(|v| v.is_finite() && v.abs() <= 3.0), "depth {depth}");
+        }
+    }
+
+    /// 0-ply scores are just the negated opponent equity of each result.
+    #[test]
+    fn score_moves_zero_ply_is_static_value() {
+        let b = Board::starting_position();
+        let d = Dice::new(6, 5);
+        let hce = HceEval::new();
+        let s = score_moves(&b, &d, 0, 0, &hce);
+        for (m, got) in genmoves(&b, &d).iter().zip(s) {
+            let want = -hce.evaluate(&m.result.swap_perspective()).equity();
+            assert_eq!(got, want);
+        }
+    }
+
+    /// Batching must not change what the search computes: the batched
+    /// `shallow_all` path and a per-position loop agree exactly.
+    #[test]
+    fn shallow_all_matches_per_position_eval() {
+        let b = Board::starting_position();
+        let hce = HceEval::new();
+        let moves = genmoves(&b, &Dice::new(4, 2));
+        for (m, got) in moves.iter().zip(shallow_all(&moves, &hce)) {
+            let want = match result(&m.result) {
+                GameResult::MoverWins(p) => p as f32,
+                _ => -hce.evaluate(&m.result.swap_perspective()).equity(),
+            };
+            assert_eq!(got, want);
+        }
+    }
+
+    /// Full width (no pruning), the ranked list's best move is the one the engine
+    /// actually plays — `score_moves` and `choose` agree wherever they can.
+    #[test]
+    fn score_moves_best_matches_choose_full_width() {
+        let hce = HceEval::new();
+        for (d1, d2) in [(3u8, 1u8), (6, 5), (5, 5)] {
+            let b = Board::starting_position();
+            let d = Dice::new(d1, d2);
+            for depth in [0u8, 1] {
+                let best = argmax(&score_moves(&b, &d, depth, 0, &hce));
+                let chosen = SearchEngine::new(&hce, depth, "t").choose(&b, &d);
+                assert_eq!(genmoves(&b, &d)[best].result, chosen.result, "{d1}{d2} depth {depth}");
+            }
+        }
     }
 }

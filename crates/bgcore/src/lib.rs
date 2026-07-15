@@ -35,4 +35,4 @@ pub use rollout::{
     build_pool, rollout_best, rollout_best_scored, rollout_dist, rollout_equity, RolloutConfig,
     RolloutEngine,
 };
-pub use search::{position_value, SearchEngine};
+pub use search::{position_value, score_moves, SearchEngine};
