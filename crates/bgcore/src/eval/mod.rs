@@ -14,7 +14,7 @@ pub mod random;
 
 pub use hce::HceEval;
 #[cfg(feature = "onnx")]
-pub use nn::NnEval;
+pub use nn::{NnEval, PhaseEval};
 pub use random::RandomEval;
 
 /// Cubeless evaluation of a position from the mover's perspective.

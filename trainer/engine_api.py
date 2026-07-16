@@ -135,6 +135,42 @@ class NativeNeuralEngine(BaseEngine):
         return scored
 
 
+class NativePhaseEngine(BaseEngine):
+    """Phase-routing neural engine (`bgcore.PhaseNeural`): a contact net while the
+    armies can still hit, a race net once they've passed.
+
+    The race net (a six-outcome softmax) beats the min-pip race play the plain
+    engine falls back to, worth ~+0.25 PPG in the bear-off (gammon-saving). The
+    contact net can be either the mature 5-output champion (`td.onnx`, the default
+    — proven, and the race net's edge is what's validated) or the fresh 6-output
+    contact net co-trained with the race net (`td_contact.onnx`); the two play
+    within noise of each other at contact.
+    """
+
+    CANDIDATES = 4
+
+    def __init__(self, contact_onnx, race_onnx, lookahead: int = 0,
+                 candidates: int | None = None):
+        if candidates is None:
+            candidates = self.CANDIDATES if lookahead >= 2 else 0
+        self._nn = bgcore.PhaseNeural(str(contact_onnx), str(race_onnx), lookahead, candidates)
+        self.lookahead = lookahead
+        self.name = f"Neural phase — {lookahead}-ply"
+
+    def static_equity(self, board) -> float:
+        return float(self._nn.equity(board))
+
+    def win_prob(self, board) -> float:
+        return float(self._nn.win_prob(board))
+
+    def analyze(self, board, d1, d2):
+        scores = self._nn.scores(board, d1, d2)
+        moves = bgcore.legal_moves_with_steps(board, d1, d2)
+        scored = [(s, r, float(eq)) for (s, r), eq in zip(moves, scores)]
+        scored.sort(key=lambda t: -t[2])
+        return scored
+
+
 class NeuralEngine(BaseEngine):
     """Neural evaluator with optional 1-ply search.
 

@@ -17,17 +17,41 @@ type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Bo
 
 /// An [`Evaluator`] backed by an ONNX value network, optimized for **any** batch
 /// size so many positions can be scored in one forward pass.
+///
+/// Handles both output conventions: the original **5** nested sigmoids
+/// (`win, win_g, win_bg, lose_g, lose_bg`) and the phase-split **6** outcome
+/// softmax (`win s/g/bg, lose s/g/bg`). Both fold into the same [`Value`] — the
+/// six outcomes are just the un-nested form of the five — so everything
+/// downstream (equity, search, rollouts) is identical.
 pub struct NnEval {
     model: TractModel,
+    outputs: usize,
 }
 
-fn out_to_value(row: &[f32]) -> Value {
-    Value { win: row[0], win_g: row[1], win_bg: row[2], lose_g: row[3], lose_bg: row[4] }
+/// Fold a model output row into a [`Value`], by output width.
+fn row_to_value(row: &[f32]) -> Value {
+    match row.len() {
+        5 => Value {
+            win: row[0], win_g: row[1], win_bg: row[2], lose_g: row[3], lose_bg: row[4],
+        },
+        // 6-outcome softmax [ws, wg, wbg, ls, lg, lbg] -> nested probabilities.
+        6 => {
+            let (ws, wg, wbg, _ls, lg, lbg) = (row[0], row[1], row[2], row[3], row[4], row[5]);
+            Value {
+                win: ws + wg + wbg,
+                win_g: wg + wbg,
+                win_bg: wbg,
+                lose_g: lg + lbg,
+                lose_bg: lbg,
+            }
+        }
+        n => panic!("unexpected net output width {n} (want 5 or 6)"),
+    }
 }
 
 impl NnEval {
-    /// Load and optimize an ONNX model from a file path. The model must take a
-    /// `[N, 198]` float input and produce `[N, 5]` probability outputs. The batch
+    /// Load and optimize an ONNX model from a file path. The model takes a
+    /// `[N, 198]` float input and produces `[N, 5]` or `[N, 6]` outputs; the batch
     /// axis is left symbolic so a single optimized plan serves any batch size.
     pub fn from_path(path: &str) -> Result<Self, String> {
         let model = onnx().model_for_path(path).map_err(|e| format!("load {path}: {e}"))?;
@@ -42,17 +66,19 @@ impl NnEval {
             .map_err(|e| format!("optimize: {e}"))?
             .into_runnable()
             .map_err(|e| format!("runnable: {e}"))?;
-        Ok(NnEval { model })
+        let mut eval = NnEval { model, outputs: 0 };
+        // Probe the output width once, so evaluate() need not re-derive it.
+        eval.outputs = eval.run_batch(&[0.0f32; features::NUM_INPUTS], 1).len();
+        Ok(eval)
     }
 
-    /// Run the net on a single 198-feature vector, returning the raw 5 outputs.
-    pub fn run(&self, feats: &[f32; features::NUM_INPUTS]) -> [f32; 5] {
-        let out = self.run_batch(feats, 1);
-        [out[0], out[1], out[2], out[3], out[4]]
+    /// The number of raw outputs per position (5 or 6).
+    pub fn outputs(&self) -> usize {
+        self.outputs
     }
 
-    /// Run the net on `n` concatenated 198-feature vectors, returning `n * 5`
-    /// outputs (row-major). One `[n, 198]` matmul instead of `n` `[1, 198]` ones.
+    /// Run the net on `n` concatenated 198-feature vectors, returning `n *
+    /// outputs()` values (row-major). One `[n, 198]` matmul, not `n` of them.
     pub fn run_batch(&self, feats: &[f32], n: usize) -> Vec<f32> {
         debug_assert_eq!(feats.len(), n * features::NUM_INPUTS);
         let input =
@@ -65,7 +91,7 @@ impl NnEval {
 
 impl Evaluator for NnEval {
     fn evaluate(&self, board: &Board) -> Value {
-        out_to_value(&self.run(&features::encode(board)))
+        row_to_value(&self.run_batch(&features::encode(board), 1))
     }
 
     fn evaluate_batch(&self, boards: &[Board]) -> Vec<Value> {
@@ -77,7 +103,59 @@ impl Evaluator for NnEval {
             feats.extend_from_slice(&features::encode(b));
         }
         let out = self.run_batch(&feats, boards.len());
-        out.chunks_exact(5).map(out_to_value).collect()
+        out.chunks_exact(self.outputs).map(row_to_value).collect()
+    }
+}
+
+/// A phase-routing [`Evaluator`]: a contact net for positions still in contact,
+/// a race net once the armies have passed ([`Board::no_contact`]). The two nets
+/// may differ in output width (e.g. a 5-output contact champion + a 6-output race
+/// net) — [`row_to_value`] normalises both. Plugs into search and rollouts like
+/// any other evaluator.
+pub struct PhaseEval {
+    contact: NnEval,
+    race: NnEval,
+}
+
+impl PhaseEval {
+    pub fn from_paths(contact: &str, race: &str) -> Result<Self, String> {
+        Ok(PhaseEval {
+            contact: NnEval::from_path(contact)?,
+            race: NnEval::from_path(race)?,
+        })
+    }
+}
+
+impl Evaluator for PhaseEval {
+    fn evaluate(&self, board: &Board) -> Value {
+        if board.no_contact() {
+            self.race.evaluate(board)
+        } else {
+            self.contact.evaluate(board)
+        }
+    }
+
+    fn evaluate_batch(&self, boards: &[Board]) -> Vec<Value> {
+        let zero = Value { win: 0.0, win_g: 0.0, win_bg: 0.0, lose_g: 0.0, lose_bg: 0.0 };
+        let mut out = vec![zero; boards.len()];
+        // Score each phase in one batched pass, then scatter back in order.
+        for race in [false, true] {
+            let idx: Vec<usize> = boards
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.no_contact() == race)
+                .map(|(i, _)| i)
+                .collect();
+            if idx.is_empty() {
+                continue;
+            }
+            let subset: Vec<Board> = idx.iter().map(|&i| boards[i].clone()).collect();
+            let ev = if race { &self.race } else { &self.contact };
+            for (k, v) in ev.evaluate_batch(&subset).into_iter().enumerate() {
+                out[idx[k]] = v;
+            }
+        }
+        out
     }
 }
 
@@ -119,5 +197,39 @@ mod tests {
                 "output {i}: tract {g} vs pytorch {e}"
             );
         }
+    }
+
+    #[test]
+    fn race_net_6output_folds_to_correct_equity() {
+        // The 6-outcome race net (trainer/export_race.py) must load, report width
+        // 6, and its folded Value must carry the same equity as the raw six
+        // softmax probabilities dotted with the outcome points.
+        let onnx_path = format!("{MODELS}/td_race.onnx");
+        let fixture_path = format!("{MODELS}/parity_race.json");
+        if !std::path::Path::new(&onnx_path).exists()
+            || !std::path::Path::new(&fixture_path).exists()
+        {
+            eprintln!("skipping: run trainer/export_race.py first");
+            return;
+        }
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture_path).unwrap()).unwrap();
+        let probs: Vec<f32> = fixture["expected_output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let points = [1.0f32, 2.0, 3.0, -1.0, -2.0, -3.0];
+        let expected_equity: f32 = probs.iter().zip(points).map(|(p, pt)| p * pt).sum();
+
+        let nn = NnEval::from_path(&onnx_path).unwrap();
+        assert_eq!(nn.outputs(), 6, "race net should have 6 outputs");
+        let v = nn.evaluate(&Board::starting_position());
+        assert!(
+            (v.equity() - expected_equity).abs() < 1e-4,
+            "folded equity {} vs fixture {expected_equity}",
+            v.equity()
+        );
     }
 }

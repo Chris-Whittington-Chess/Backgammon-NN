@@ -19,8 +19,12 @@ venv/
 # ignore intermediate checkpoints and generated fixtures.
 /models/*.pt
 !/models/td_latest.pt
+!/models/td_phase.pt
+!/models/td_256-128_champion.pt
 /models/*.onnx
 !/models/td.onnx
+!/models/td_race.onnx
+!/models/td_contact.onnx
 /models/*.json
 /data/
 

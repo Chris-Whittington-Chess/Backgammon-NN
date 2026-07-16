@@ -29,7 +29,8 @@ a = Analysis(
     binaries=[],
     datas=[
         # Matches the layout `_root()` expects under sys._MEIPASS.
-        (str(ROOT / "models" / "td.onnx"), "models"),
+        (str(ROOT / "models" / "td.onnx"), "models"),        # champion / contact
+        (str(ROOT / "models" / "td_race.onnx"), "models"),   # phase engine: race net
         (str(ROOT / "gui" / "assets"), "assets"),
     ],
     # The engine extension, plus the trainer-side modules app.py imports by name.

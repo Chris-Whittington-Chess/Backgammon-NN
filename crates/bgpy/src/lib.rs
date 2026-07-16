@@ -286,6 +286,50 @@ impl Neural {
     }
 }
 
+/// A phase-routing neural engine: a contact net for positions still in contact,
+/// a race net once the armies have passed. Same interface and search as
+/// [`Neural`]; the only difference is the evaluator routes by phase. The two nets
+/// may differ in output width (a 5-output contact champion + a 6-output race net).
+#[cfg(feature = "onnx")]
+#[pyclass]
+struct PhaseNeural {
+    eval: bgengine::eval::PhaseEval,
+    lookahead: u8,
+    candidates: usize,
+}
+
+#[cfg(feature = "onnx")]
+#[pymethods]
+impl PhaseNeural {
+    #[new]
+    #[pyo3(signature = (contact_path, race_path, lookahead = 0, candidates = 0))]
+    fn new(contact_path: &str, race_path: &str, lookahead: u8, candidates: usize) -> PyResult<Self> {
+        let eval = bgengine::eval::PhaseEval::from_paths(contact_path, race_path)
+            .map_err(PyValueError::new_err)?;
+        Ok(PhaseNeural { eval, lookahead, candidates })
+    }
+
+    fn equity(&self, board: &PyBoard) -> f32 {
+        self.eval.evaluate(&board.inner).equity()
+    }
+
+    fn win_prob(&self, board: &PyBoard) -> f32 {
+        self.eval.evaluate(&board.inner).win
+    }
+
+    fn scores(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8) -> Vec<f32> {
+        py.allow_threads(|| {
+            bgengine::score_moves(
+                &board.inner,
+                &Dice::new(d1, d2),
+                self.lookahead,
+                self.candidates,
+                &self.eval,
+            )
+        })
+    }
+}
+
 /// Parallel Monte-Carlo rollout engine (requires the `onnx` build feature).
 /// Loads an exported ONNX net once and rolls out positions natively in Rust.
 #[cfg(feature = "onnx")]
@@ -367,6 +411,8 @@ impl Rollouts {
 fn bgcore(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "onnx")]
     m.add_class::<Neural>()?;
+    #[cfg(feature = "onnx")]
+    m.add_class::<PhaseNeural>()?;
     #[cfg(feature = "onnx")]
     m.add_class::<Rollouts>()?;
     m.add_class::<PyBoard>()?;

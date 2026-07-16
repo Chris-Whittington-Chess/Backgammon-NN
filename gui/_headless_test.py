@@ -30,10 +30,16 @@ def settle(win, timeout=25.0):
     """Pump until the engine has finished thinking and moving.
 
     The engine chooses on a worker thread, so nothing progresses unless the event
-    loop turns — and the checker animation is driven frame by frame here.
+    loop turns — and the checker animation is driven frame by frame here. We block
+    on the thread pool before pumping so the worker's result signal is guaranteed
+    queued when processEvents runs; otherwise the manual pump can race the worker
+    (fine in the real app, whose loop runs continuously).
     """
+    from PySide6.QtCore import QThreadPool
+
     end = time.time() + timeout
     while time.time() < end:
+        QThreadPool.globalInstance().waitForDone(20)
         QApplication.processEvents()
         if win._anim_timer.isActive():
             win._anim_frame()
@@ -93,6 +99,7 @@ def play_turns(win, n):
 def main():
     _ = QApplication(sys.argv)
     win = gui.MainWindow()
+    win.sync_engine = True                 # run engine turns inline (deterministic)
     win.resize(1080, 700)
     win.show()
     grab(win, "board_start.png")           # centered cube shows "1"

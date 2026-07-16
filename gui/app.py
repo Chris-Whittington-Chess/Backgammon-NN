@@ -61,6 +61,7 @@ from cube import should_double, should_take
 from engine_api import (
     HceEngine,
     NativeNeuralEngine,
+    NativePhaseEngine,
     NeuralEngine,
     RandomEngine,
     RolloutEngine,
@@ -708,6 +709,20 @@ class MainWindow(QMainWindow):
                 self.opponents[e.name] = e
             self.evaluator = neurals[0]
 
+        # Phase-routing engines: champion for contact, race net for race (the race
+        # net beats min-pip by ~+0.25 PPG in the bear-off). PHASE_CONTACT picks the
+        # contact net — the mature champion `td.onnx` by default; swap to
+        # `td_contact.onnx` for the fresh co-trained contact net (plays within noise
+        # of the champion at contact).
+        PHASE_CONTACT = "td.onnx"
+        race_onnx = ROOT / "models" / "td_race.onnx"
+        contact_onnx = ROOT / "models" / PHASE_CONTACT
+        if (hasattr(bgcore, "PhaseNeural") and race_onnx.exists()
+                and contact_onnx.exists()):
+            for p in (0, 1, 2):
+                e = NativePhaseEngine(contact_onnx, race_onnx, lookahead=p)
+                self.opponents[e.name] = e
+
         self._cube_ro = None
         rollout = None
         if hasattr(bgcore, "Rollouts") and onnx_path.exists():
@@ -1020,7 +1035,21 @@ class MainWindow(QMainWindow):
 
         Results from a superseded game (New Game mid-think) are dropped: `gen` is
         bumped whenever the position they were computed for stops being current.
+
+        `sync_engine` (set by the headless test) runs `fn` inline instead — the
+        worker exists only to keep the real app's window responsive, and driving a
+        cross-thread signal by hand from a test races the pump.
         """
+        if getattr(self, "sync_engine", False):
+            try:
+                result = fn()
+            except Exception as exc:  # noqa: BLE001 — mirror _on_task_done
+                self.busy = False
+                self.refresh(f"Engine error: {exc}")
+                return
+            if not self.game_over:
+                then(result)
+            return
         task = _Task(fn, self._gen)
         task.signals.done.connect(self._on_task_done)
         # Hold the task: QThreadPool deletes the runnable after run(), and the
