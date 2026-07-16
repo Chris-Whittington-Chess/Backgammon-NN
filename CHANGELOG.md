@@ -9,6 +9,27 @@ Downloads: [Releases](../../releases). The app is a single self-contained
 
 ---
 
+## Deeper net promoted (256-128-128)
+
+- The live net gains a third hidden layer: **198→256→128→128→5**, squared-ReLU,
+  trained over **2M self-play games** (resuming through the run so tests never
+  cost training). It beats the previous 256-128 champion **53.6%** head-to-head
+  at 0-ply (z=8.7 over 14,800 games) and holds ~52% at 1-ply; the two tie against
+  HCE.
+- **The gains from extra depth are clearly diminishing.** The edge appeared in
+  the first ~150k games and the remaining 1.85M added nothing measurable — a
+  smaller step than the 58.8% the 256-128 net won over *its* predecessor, for far
+  more training. The next lever is wildbg-style split contact/race nets, not more
+  layers. The outgoing champion is kept as `models/td_256-128_champion.pt`.
+
+## v1.5.0 — no more freezing while the engine thinks
+
+- The engine chose its move on the UI thread, freezing the window for the best
+  part of a second every turn. Its move choice and cube decision now run on a
+  worker thread: worst UI stall during a full engine turn is **164ms, down from
+  ~800ms**. The Rust rollout engine had to release the GIL first, or a worker
+  thread would only have moved the stall rather than removed it.
+
 ## v1.4.3 — the dice you see are the dice it plays
 
 - **The engine appeared to roll one pair and move on another.** The tumble's last

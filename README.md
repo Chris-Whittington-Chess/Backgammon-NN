@@ -55,10 +55,11 @@ PySide6 GUI  ──►  Python (trainer + engine adapters)  ──PyO3──► 
 
 - **Move generation validated** against the wildbg reference engine across
   3.15M (position, dice) pairs — zero mismatches.
-- **198-input Tesauro encoding** and a 198→256→128→5 value net (win / gammon /
-  backgammon probabilities) with squared-ReLU activations, trained by self-play.
-  Depth was what broke the earlier net's strength ceiling: this net beats the
-  older 128-wide one **58.8%** head-to-head.
+- **198-input Tesauro encoding** and a 198→256→128→128→5 value net (win / gammon /
+  backgammon probabilities) with squared-ReLU activations, trained by self-play
+  over **2M games**. Depth broke the original single-layer strength ceiling; a
+  third hidden layer adds a further ~54% head-to-head edge, though the gains from
+  extra depth are now clearly diminishing.
 - **Cross-language parity**: PyTorch → ONNX → Rust `tract` inference match to
   <1e-4.
 - **Expectiminimax search** to 2 ply with GNUbg-style candidate pruning, plus
