@@ -165,6 +165,7 @@ class BoardView(QWidget):
         self.dest_points: set[int] = set()
         self.carrying: int | None = None       # selected source point (ringed)
         self.floating: tuple[float, float, bool] | None = None  # engine-move sprite
+        self.anim_from: int | None = None       # display point a flying checker left
         self.cube_value = 1
         self.cube_owner: int | None = None     # None centered, 0 you, 1 engine
         self.wink_dice = False                 # pulse the dice (your turn to roll)
@@ -298,7 +299,9 @@ class BoardView(QWidget):
             n = self.board.point(point)
             human = n > 0
             count = abs(n)
-            if count == 0:
+            if point == self.anim_from:
+                count -= 1          # the top checker of this point is in flight
+            if count <= 0:
                 continue
             shown = min(count, 5)
             for i in range(shown):
@@ -313,7 +316,10 @@ class BoardView(QWidget):
 
     def _draw_bar(self, p, g):
         for side, human in ((0, True), (1, False)):
-            for i in range(self.board.bar(side)):
+            n = self.board.bar(side)
+            if self.anim_from == BAR and side == 1:
+                n -= 1              # the engine's flying checker left the bar
+            for i in range(n):
                 cx, cy = self.point_center(g, BAR, i, side=side)
                 self._disc(p, cx, cy, g["r"], human)
         if BAR in self.source_points or BAR == self.carrying:
@@ -1396,13 +1402,15 @@ class MainWindow(QMainWindow):
             ti = 0 if dp_to in (BAR, OFF) else max(abs(after.point(dp_to)) - 1, 0)
             self._anim_queue.append((
                 before.swap_perspective(),
+                dp_from,
                 self.view.point_center(g, dp_from, fi, side=1),
                 self.view.point_center(g, dp_to, ti, side=1),
             ))
 
     def _start_anim_segment(self):
-        disp_before, self._a_from, self._a_to = self._anim_queue[self._anim_step]
+        disp_before, dp_from, self._a_from, self._a_to = self._anim_queue[self._anim_step]
         self.view.board = disp_before
+        self.view.anim_from = dp_from    # hide this point's top checker (it's flying)
         self.view.source_points = set()
         self.view.dest_points = set()
         self._a_frame = 0
@@ -1425,6 +1433,7 @@ class MainWindow(QMainWindow):
                 self._start_anim_segment()
             else:
                 self.view.floating = None
+                self.view.anim_from = None
                 self._finish_engine_move()
 
     def _finish_engine_move(self):
