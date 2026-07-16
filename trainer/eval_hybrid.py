@@ -94,24 +94,32 @@ def main():
     baseline = composite_policy(("net5", champ), ("minpip", None))  # champion + min-pip
 
     track = [0]           # games that reached a race
-    wins_h = pts_h = 0
+    wins_h, results = 0, []
     for g in range(games):
         seed = 2000 + g // 2
         a_seat = g % 2            # alternate which seat the hybrid takes; dice mirrored
         p = play(hybrid, baseline, seed, a_seat, track)
-        pts_h += p
+        results.append(p)
         if p > 0:
             wins_h += 1
 
     import math
     wr = wins_h / games
-    se = math.sqrt(0.25 / games)
-    z = (wr - 0.5) / se
-    print(f"champion+racenet vs champion+minpip:  {100*wr:.1f}%  (z {z:+.2f})  PPG {pts_h/games:+.3f}")
-    print(f"games that reached a race: {100*track[0]/games:.0f}%")
-    verdict = ("race net HELPS" if z > 1.96 else
-               "race net HURTS" if z < -1.96 else "too close to call")
-    print(f"=> {verdict}")
+    z_wr = (wr - 0.5) / math.sqrt(0.25 / games)
+    ppg = sum(results) / games
+    var = sum((r - ppg) ** 2 for r in results) / (games - 1)
+    se_ppg = math.sqrt(var / games)
+    z_ppg = ppg / se_ppg if se_ppg else 0.0
+
+    print(f"champion+racenet vs champion+minpip:")
+    print(f"  win rate {100*wr:.1f}%   (z {z_wr:+.2f})")
+    print(f"  PPG     {ppg:+.3f}   (z {z_ppg:+.2f})   <- the real metric: race play "
+          f"is about gammons, not extra wins")
+    print(f"  games that reached a race: {100*track[0]/games:.0f}%")
+    # PPG is what matters for a race/bear-off evaluator, so verdict is on PPG.
+    verdict = ("race net HELPS" if z_ppg > 1.96 else
+               "race net HURTS" if z_ppg < -1.96 else "too close to call")
+    print(f"=> {verdict} (on PPG)")
 
 
 if __name__ == "__main__":
