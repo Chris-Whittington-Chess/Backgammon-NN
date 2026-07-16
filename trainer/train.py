@@ -201,11 +201,8 @@ def main():
     ap.add_argument("--lam", type=float, default=1.0, help="1.0 = Monte-Carlo; <1 can collapse")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--hidden", type=str, default="128",
-                    help="hidden layer sizes after the pool, e.g. 128 or 256,128; "
-                         "empty for none")
+                    help="hidden layer sizes, e.g. 128 or 256,128")
     ap.add_argument("--act", choices=["relu", "sqrelu"], default="relu")
-    ap.add_argument("--proj", type=int, default=0,
-                    help="product-pool projection width (even, e.g. 512); 0 = plain MLP")
     ap.add_argument("--bench-every", type=int, default=5)
     ap.add_argument("--bench-games", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
@@ -218,9 +215,8 @@ def main():
 
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
-    sizes = [int(x) for x in args.hidden.split(",") if x.strip()]
-    hidden = sizes[0] if len(sizes) == 1 else sizes   # int / list / [] for none
-    proj = args.proj or None
+    sizes = [int(x) for x in args.hidden.split(",")]
+    hidden = sizes[0] if len(sizes) == 1 else sizes
     MODELS_DIR.mkdir(exist_ok=True)
 
     start_iter = 0
@@ -228,13 +224,11 @@ def main():
         ck = torch.load(MODELS_DIR / args.resume, map_location="cpu")
         # Trust the checkpoint's shape over the flags: resuming into a different
         # architecture silently trains a different net.
-        if (ck.get("hidden") != hidden or ck.get("act") != args.act
-                or ck.get("proj") != proj):
+        if ck.get("hidden") != hidden or ck.get("act") != args.act:
             raise SystemExit(
-                f"--resume {args.resume} is hidden={ck.get('hidden')} act={ck.get('act')} "
-                f"proj={ck.get('proj')}, but you asked for hidden={hidden} act={args.act} "
-                f"proj={proj}")
-        net = ValueNet(hidden, args.act, proj)
+                f"--resume {args.resume} is hidden={ck.get('hidden')} act={ck.get('act')}, "
+                f"but you asked for hidden={hidden} act={args.act}")
+        net = ValueNet(hidden, args.act)
         net.load_state_dict(ck["model"])
         opt = torch.optim.Adam(net.parameters(), lr=args.lr)
         if "opt" in ck:
@@ -243,12 +237,10 @@ def main():
         print(f"Resumed {args.resume} at iter {start_iter} "
               f"(optimizer state: {'restored' if 'opt' in ck else 'MISSING — fresh Adam'})")
     else:
-        net = ValueNet(hidden, args.act, proj)
+        net = ValueNet(hidden, args.act)
         opt = torch.optim.Adam(net.parameters(), lr=args.lr)
 
-    n_params = sum(p.numel() for p in net.parameters())
-    print(f"TD(lambda={args.lam}) self-play | hidden={hidden} act={args.act} "
-          f"proj={proj} | {n_params:,} params | lr={args.lr}")
+    print(f"TD(lambda={args.lam}) self-play | hidden={hidden} act={args.act} lr={args.lr}")
     if not args.resume:
         print("Baseline (untrained net):")
         wr, ppg = benchmark(net, random_policy(), args.bench_games, rng)
@@ -272,7 +264,7 @@ def main():
             )
             torch.save(
                 {"model": net.state_dict(), "opt": opt.state_dict(),
-                 "hidden": hidden, "act": args.act, "proj": proj, "iter": it},
+                 "hidden": hidden, "act": args.act, "iter": it},
                 MODELS_DIR / args.out,
             )
         print(line, flush=True)
