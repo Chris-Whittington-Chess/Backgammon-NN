@@ -224,6 +224,10 @@ def main():
         ck = torch.load(MODELS_DIR / args.resume, map_location="cpu")
         # Trust the checkpoint's shape over the flags: resuming into a different
         # architecture silently trains a different net.
+        if ck.get("phase_split"):
+            raise SystemExit(
+                f"--resume {args.resume} is a phase-split (two-net, 6-output) "
+                f"checkpoint — use train_phase.py, not train.py")
         if ck.get("hidden") != hidden or ck.get("act") != args.act:
             raise SystemExit(
                 f"--resume {args.resume} is hidden={ck.get('hidden')} act={ck.get('act')}, "

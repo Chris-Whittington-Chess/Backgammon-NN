@@ -87,3 +87,73 @@ def outcome_vector(points: int) -> list[float]:
     """The terminal target from the winner's perspective: +points -> a win
     vector; the sign convention is handled by the caller. `points` in 1..=3."""
     return [1.0, float(points >= 2), float(points >= 3), 0.0, 0.0]
+
+
+# ---------------------------------------------------------------------------
+# Six-outcome (softmax) head — the phase-split experiment.
+#
+# Instead of the 5 nested sigmoids above, model the six *mutually exclusive*
+# game outcomes directly and train with cross-entropy. Same equity as the
+# 5-output net (verified by construction), but a properly normalised
+# distribution and a loss that fits the one-hot Monte-Carlo target cleanly.
+# ---------------------------------------------------------------------------
+
+NUM_OUTCOMES = 6
+
+# Points won (+) or lost (-) for each outcome class, in output order:
+# [win single, win gammon, win bg, lose single, lose gammon, lose bg].
+OUTCOME_POINTS = (1.0, 2.0, 3.0, -1.0, -2.0, -3.0)
+
+
+class ValueNet6(nn.Module):
+    """198 -> hidden layer(s) -> 6 logits over the mutually-exclusive outcomes.
+
+    Same body as :class:`ValueNet`; the head is 6 raw logits (no sigmoid).
+    Apply softmax for probabilities (`probs`), or train from the logits with
+    cross-entropy against the outcome class.
+    """
+
+    def __init__(self, hidden=128, act: str = "relu"):
+        super().__init__()
+        sizes = [hidden] if isinstance(hidden, int) else list(hidden)
+        layers = []
+        prev = NUM_INPUTS
+        for h in sizes:
+            layers += [nn.Linear(prev, h), _activation(act)]
+            prev = h
+        layers += [nn.Linear(prev, NUM_OUTCOMES)]   # logits, no activation
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)                          # logits [..., 6]
+
+    def probs(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.softmax(self.forward(x), dim=-1)
+
+
+def net6_from_state(sd, hidden, act) -> "ValueNet6":
+    net = ValueNet6(hidden, act)
+    net.load_state_dict(sd)
+    net.eval()
+    return net
+
+
+def equity6(p: torch.Tensor) -> torch.Tensor:
+    """Cubeless equity from a 6-outcome probability distribution `p` (`[..., 6]`):
+    ``1*ws + 2*wg + 3*wbg - 1*ls - 2*lg - 3*lbg``. Equal to the 5-output
+    ``equity`` for the same underlying position."""
+    pts = torch.tensor(OUTCOME_POINTS, dtype=p.dtype, device=p.device)
+    return (p * pts).sum(dim=-1)
+
+
+def flip6(p: torch.Tensor) -> torch.Tensor:
+    """Opponent-perspective distribution -> mover's: swap the win and lose halves.
+    ``[ws, wg, wbg, ls, lg, lbg]`` -> ``[ls, lg, lbg, ws, wg, wbg]``."""
+    ws, wg, wbg, ls, lg, lbg = p.unbind(dim=-1)
+    return torch.stack([ls, lg, lbg, ws, wg, wbg], dim=-1)
+
+
+def outcome_class(points: int) -> int:
+    """The outcome class index (0..2) for a WIN of `points` (1..=3), from the
+    winner's perspective: 1->win single, 2->win gammon, 3->win backgammon."""
+    return min(points, 3) - 1
