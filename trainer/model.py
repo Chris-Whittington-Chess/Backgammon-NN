@@ -170,15 +170,18 @@ def outcome_class(points: int) -> int:
 # only the selected head specialises.
 # ---------------------------------------------------------------------------
 
-N_BUCKETS = 8
-# Total pips at the start are 2*167 = 334; ~42 per bucket spans the game.
-PIP_PER_BUCKET = 42
+# Bucket edges on total pip count (both sides), calibrated by
+# trainer/calibrate_buckets.py to the octiles of champion self-play so each of the
+# 8 buckets holds ~1/8 of positions (uniform 42-pip slices were ~90x imbalanced).
+# MUST match the array in crates/bgcore/src/eval/nn.rs.
+PIP_BUCKET_EDGES = (85, 131, 169, 205, 238, 271, 305)
+N_BUCKETS = len(PIP_BUCKET_EDGES) + 1  # 8
 
 
 def pip_bucket(total_pips: int) -> int:
-    """Bucket index (0..N_BUCKETS-1) from the total pip count of both sides.
-    Must match the Rust selector exactly."""
-    return min(total_pips // PIP_PER_BUCKET, N_BUCKETS - 1)
+    """Bucket index (0..N_BUCKETS-1) from the total pip count of both sides — the
+    number of edges it meets or exceeds. Must match the Rust selector exactly."""
+    return sum(1 for e in PIP_BUCKET_EDGES if total_pips >= e)
 
 
 class ValueNetBucketed(nn.Module):

@@ -17,15 +17,17 @@ type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Bo
 
 /// Pip-count output buckets (must match `trainer/model.py`): a `[N, N_BUCKETS*6]`
 /// net emits one 6-outcome softmax per total-pip bucket, and the engine picks the
-/// bucket for the position it is scoring.
-const N_BUCKETS: usize = 8;
-const PIP_PER_BUCKET: i32 = 42;
+/// bucket for the position it is scoring. The edges are calibrated octiles of
+/// champion self-play (`trainer/calibrate_buckets.py`) for even population — keep
+/// this array identical to `PIP_BUCKET_EDGES` in model.py.
+const PIP_BUCKET_EDGES: [i32; 7] = [85, 131, 169, 205, 238, 271, 305];
+const N_BUCKETS: usize = PIP_BUCKET_EDGES.len() + 1; // 8
 
-/// Total-pip bucket for `board` (both sides). Perspective-invariant, so a board
-/// and its swap share a bucket.
+/// Total-pip bucket for `board` (both sides): the number of edges it meets or
+/// exceeds. Perspective-invariant, so a board and its swap share a bucket.
 fn pip_bucket(board: &Board) -> usize {
     let total = board.pip_count(MOVER) + board.pip_count(OPP);
-    ((total / PIP_PER_BUCKET) as usize).min(N_BUCKETS - 1)
+    PIP_BUCKET_EDGES.iter().filter(|&&e| total >= e).count()
 }
 
 /// An [`Evaluator`] backed by an ONNX value network, optimized for **any** batch
