@@ -157,3 +157,65 @@ def outcome_class(points: int) -> int:
     """The outcome class index (0..2) for a WIN of `points` (1..=3), from the
     winner's perspective: 1->win single, 2->win gammon, 3->win backgammon."""
     return min(points, 3) - 1
+
+
+# ---------------------------------------------------------------------------
+# Pip-count output buckets (Stockfish-NNUE style).
+#
+# One shared body, N_BUCKETS output heads (each the 6-outcome softmax), selected
+# by *total* pip count (both sides). Total pips is the faithful analog of SF's
+# total piece count: it decreases monotonically over the game and is
+# perspective-invariant, so a position and its swap share a bucket and equity
+# stays antisymmetric. The body trains on every position (no data starvation);
+# only the selected head specialises.
+# ---------------------------------------------------------------------------
+
+N_BUCKETS = 8
+# Total pips at the start are 2*167 = 334; ~42 per bucket spans the game.
+PIP_PER_BUCKET = 42
+
+
+def pip_bucket(total_pips: int) -> int:
+    """Bucket index (0..N_BUCKETS-1) from the total pip count of both sides.
+    Must match the Rust selector exactly."""
+    return min(total_pips // PIP_PER_BUCKET, N_BUCKETS - 1)
+
+
+class ValueNetBucketed(nn.Module):
+    """Shared body -> N_BUCKETS x 6-outcome heads, one selected per position.
+
+    `forward` returns all heads' logits, shape ``[..., N_BUCKETS, 6]``. Training
+    gathers the per-sample bucket; inference (Rust) runs all heads and slices the
+    one for the position's total-pip bucket. Same body shape as ValueNet6.
+    """
+
+    def __init__(self, hidden=(256, 128), act: str = "relu"):
+        super().__init__()
+        sizes = [hidden] if isinstance(hidden, int) else list(hidden)
+        layers = []
+        prev = NUM_INPUTS
+        for h in sizes:
+            layers += [nn.Linear(prev, h), _activation(act)]
+            prev = h
+        self.body = nn.Sequential(*layers)
+        self.heads = nn.Linear(prev, N_BUCKETS * NUM_OUTCOMES)   # 8 * 6 = 48
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.body(x)
+        return self.heads(h).view(*h.shape[:-1], N_BUCKETS, NUM_OUTCOMES)
+
+    def logits_for(self, x: torch.Tensor, buckets: torch.Tensor) -> torch.Tensor:
+        """Per-sample selected head logits, ``[N, 6]``. `buckets` is a LongTensor
+        of bucket indices."""
+        out = self.forward(x)                                   # [N, 8, 6]
+        return out[torch.arange(out.size(0)), buckets]          # [N, 6]
+
+    def probs_for(self, x: torch.Tensor, buckets: torch.Tensor) -> torch.Tensor:
+        return torch.softmax(self.logits_for(x, buckets), dim=-1)
+
+
+def net_bucketed_from_state(sd, hidden, act) -> "ValueNetBucketed":
+    net = ValueNetBucketed(hidden, act)
+    net.load_state_dict(sd)
+    net.eval()
+    return net

@@ -7,13 +7,26 @@
 //!
 //! Enabled by the `onnx` cargo feature.
 
-use crate::board::Board;
+use crate::board::{Board, MOVER, OPP};
 use crate::eval::{Evaluator, Value};
 use crate::features;
 use tract_onnx::prelude::*;
 use tract_onnx::tract_hir::shapefactoid;
 
 type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+
+/// Pip-count output buckets (must match `trainer/model.py`): a `[N, N_BUCKETS*6]`
+/// net emits one 6-outcome softmax per total-pip bucket, and the engine picks the
+/// bucket for the position it is scoring.
+const N_BUCKETS: usize = 8;
+const PIP_PER_BUCKET: i32 = 42;
+
+/// Total-pip bucket for `board` (both sides). Perspective-invariant, so a board
+/// and its swap share a bucket.
+fn pip_bucket(board: &Board) -> usize {
+    let total = board.pip_count(MOVER) + board.pip_count(OPP);
+    ((total / PIP_PER_BUCKET) as usize).min(N_BUCKETS - 1)
+}
 
 /// An [`Evaluator`] backed by an ONNX value network, optimized for **any** batch
 /// size so many positions can be scored in one forward pass.
@@ -72,9 +85,25 @@ impl NnEval {
         Ok(eval)
     }
 
-    /// The number of raw outputs per position (5 or 6).
+    /// The number of raw outputs per position (5, 6, or `N_BUCKETS*6` bucketed).
     pub fn outputs(&self) -> usize {
         self.outputs
+    }
+
+    /// Whether this is a pip-count-bucketed net (`N_BUCKETS` heads of 6).
+    fn bucketed(&self) -> bool {
+        self.outputs == N_BUCKETS * 6
+    }
+
+    /// Fold one position's raw output row into a [`Value`], selecting the
+    /// total-pip bucket's 6 outputs first when the net is bucketed.
+    fn fold(&self, row: &[f32], board: &Board) -> Value {
+        if self.bucketed() {
+            let b = pip_bucket(board);
+            row_to_value(&row[b * 6..b * 6 + 6])
+        } else {
+            row_to_value(row)
+        }
     }
 
     /// Run the net on `n` concatenated 198-feature vectors, returning `n *
@@ -91,7 +120,7 @@ impl NnEval {
 
 impl Evaluator for NnEval {
     fn evaluate(&self, board: &Board) -> Value {
-        row_to_value(&self.run_batch(&features::encode(board), 1))
+        self.fold(&self.run_batch(&features::encode(board), 1), board)
     }
 
     fn evaluate_batch(&self, boards: &[Board]) -> Vec<Value> {
@@ -103,7 +132,10 @@ impl Evaluator for NnEval {
             feats.extend_from_slice(&features::encode(b));
         }
         let out = self.run_batch(&feats, boards.len());
-        out.chunks_exact(self.outputs).map(row_to_value).collect()
+        out.chunks_exact(self.outputs)
+            .zip(boards)
+            .map(|(row, b)| self.fold(row, b))
+            .collect()
     }
 }
 
@@ -226,6 +258,43 @@ mod tests {
         let nn = NnEval::from_path(&onnx_path).unwrap();
         assert_eq!(nn.outputs(), 6, "race net should have 6 outputs");
         let v = nn.evaluate(&Board::starting_position());
+        assert!(
+            (v.equity() - expected_equity).abs() < 1e-4,
+            "folded equity {} vs fixture {expected_equity}",
+            v.equity()
+        );
+    }
+
+    #[test]
+    fn bucketed_net_selects_the_pip_bucket() {
+        // The bucketed net (trainer/export_bucketed.py) must load with width
+        // N_BUCKETS*6, and evaluating a position must fold the *selected* pip
+        // bucket's 6 probabilities — matching the fixture's chosen bucket.
+        let onnx_path = format!("{MODELS}/td_bucket.onnx");
+        let fixture_path = format!("{MODELS}/parity_bucket.json");
+        if !std::path::Path::new(&onnx_path).exists()
+            || !std::path::Path::new(&fixture_path).exists()
+        {
+            eprintln!("skipping: run trainer/export_bucketed.py first");
+            return;
+        }
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture_path).unwrap()).unwrap();
+        let probs: Vec<f32> = fixture["expected_bucket_output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let points = [1.0f32, 2.0, 3.0, -1.0, -2.0, -3.0];
+        let expected_equity: f32 = probs.iter().zip(points).map(|(p, pt)| p * pt).sum();
+
+        let nn = NnEval::from_path(&onnx_path).unwrap();
+        assert_eq!(nn.outputs(), N_BUCKETS * 6, "bucketed net width");
+        let start = Board::starting_position();
+        // The starting position sits in the top bucket (334 total pips).
+        assert_eq!(pip_bucket(&start), fixture["bucket"].as_u64().unwrap() as usize);
+        let v = nn.evaluate(&start);
         assert!(
             (v.equity() - expected_equity).abs() < 1e-4,
             "folded equity {} vs fixture {expected_equity}",
