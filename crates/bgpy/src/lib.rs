@@ -330,12 +330,64 @@ impl PhaseNeural {
     }
 }
 
+/// The evaluator behind a [`Rollouts`] — one net for every position, or a phase
+/// pair (contact + race).
+#[cfg(feature = "onnx")]
+enum RollEval {
+    Single(bgengine::eval::NnEval),
+    Phase(bgengine::eval::PhaseEval),
+}
+
+// Small generic wrappers so the two evaluator kinds share one code path each.
+#[cfg(feature = "onnx")]
+fn ro_equity<E: bgengine::Evaluator + Sync>(
+    e: &E,
+    b: &Board,
+    cfg: &bgengine::RolloutConfig,
+    pool: &Option<rayon::ThreadPool>,
+) -> f32 {
+    match pool {
+        Some(p) => p.install(|| bgengine::rollout_equity(b, e, cfg)),
+        None => bgengine::rollout_equity(b, e, cfg),
+    }
+}
+
+#[cfg(feature = "onnx")]
+fn ro_dist<E: bgengine::Evaluator + Sync>(
+    e: &E,
+    b: &Board,
+    cfg: &bgengine::RolloutConfig,
+    pool: &Option<rayon::ThreadPool>,
+) -> [f32; 5] {
+    match pool {
+        Some(p) => p.install(|| bgengine::rollout_dist(b, e, cfg)),
+        None => bgengine::rollout_dist(b, e, cfg),
+    }
+}
+
+#[cfg(feature = "onnx")]
+fn ro_best<E: bgengine::Evaluator + Sync>(
+    e: &E,
+    b: &Board,
+    dice: &Dice,
+    cfg: &bgengine::RolloutConfig,
+    pool: &Option<rayon::ThreadPool>,
+) -> (Board, f32) {
+    let (mv, eq) = match pool {
+        Some(p) => p.install(|| bgengine::rollout_best_scored(b, dice, e, cfg)),
+        None => bgengine::rollout_best_scored(b, dice, e, cfg),
+    };
+    (mv.result, eq)
+}
+
 /// Parallel Monte-Carlo rollout engine (requires the `onnx` build feature).
 /// Loads an exported ONNX net once and rolls out positions natively in Rust.
+/// Build with [`Rollouts::phase`] to route race play through a race net instead
+/// of min-pip.
 #[cfg(feature = "onnx")]
 #[pyclass]
 struct Rollouts {
-    nn: bgengine::eval::NnEval,
+    eval: RollEval,
     cfg: bgengine::RolloutConfig,
     pool: Option<rayon::ThreadPool>,
 }
@@ -356,15 +408,34 @@ impl Rollouts {
     ) -> PyResult<Self> {
         let nn = bgengine::eval::NnEval::from_path(onnx_path).map_err(PyValueError::new_err)?;
         let cfg = bgengine::RolloutConfig {
-            trials,
-            truncate_plies,
-            candidates,
-            seed,
-            movetime_ms,
-            threads,
+            trials, truncate_plies, candidates, seed, movetime_ms, threads,
+            net_race: false,   // one net for all positions -> min-pip race playout
         };
-        let pool = bgengine::build_pool(threads);
-        Ok(Rollouts { nn, cfg, pool })
+        Ok(Rollouts { eval: RollEval::Single(nn), cfg, pool: bgengine::build_pool(threads) })
+    }
+
+    /// A phase rollout: `contact_path` for positions in contact, `race_path` once
+    /// they've passed. Race play in the playout uses the race net (not min-pip),
+    /// since it is trained on races.
+    #[staticmethod]
+    #[pyo3(signature = (contact_path, race_path, trials = 180, truncate_plies = 11, candidates = 6, seed = 0x5EED, movetime_ms = 0, threads = 0))]
+    fn phase(
+        contact_path: &str,
+        race_path: &str,
+        trials: usize,
+        truncate_plies: usize,
+        candidates: usize,
+        seed: u64,
+        movetime_ms: u64,
+        threads: usize,
+    ) -> PyResult<Self> {
+        let pe = bgengine::eval::PhaseEval::from_paths(contact_path, race_path)
+            .map_err(PyValueError::new_err)?;
+        let cfg = bgengine::RolloutConfig {
+            trials, truncate_plies, candidates, seed, movetime_ms, threads,
+            net_race: true,
+        };
+        Ok(Rollouts { eval: RollEval::Phase(pe), cfg, pool: bgengine::build_pool(threads) })
     }
 
     /// Rollout equity for the side to move at `board`.
@@ -373,9 +444,9 @@ impl Rollouts {
     /// pushes this onto a worker thread to keep a UI alive gains nothing if the
     /// GIL is held for the duration.
     fn equity(&self, py: Python<'_>, board: &PyBoard) -> f32 {
-        py.allow_threads(|| match &self.pool {
-            Some(p) => p.install(|| bgengine::rollout_equity(&board.inner, &self.nn, &self.cfg)),
-            None => bgengine::rollout_equity(&board.inner, &self.nn, &self.cfg),
+        py.allow_threads(|| match &self.eval {
+            RollEval::Single(nn) => ro_equity(nn, &board.inner, &self.cfg, &self.pool),
+            RollEval::Phase(pe) => ro_equity(pe, &board.inner, &self.cfg, &self.pool),
         })
     }
 
@@ -383,27 +454,22 @@ impl Rollouts {
     /// `[win, win_g, win_bg, lose_g, lose_bg]` — the 5 training targets.
     /// Releases the GIL.
     fn dist(&self, py: Python<'_>, board: &PyBoard) -> Vec<f32> {
-        py.allow_threads(|| {
-            let f = || bgengine::rollout_dist(&board.inner, &self.nn, &self.cfg);
-            match &self.pool {
-                Some(p) => p.install(f).to_vec(),
-                None => f().to_vec(),
-            }
+        py.allow_threads(|| match &self.eval {
+            RollEval::Single(nn) => ro_dist(nn, &board.inner, &self.cfg, &self.pool),
+            RollEval::Phase(pe) => ro_dist(pe, &board.inner, &self.cfg, &self.pool),
         })
+        .to_vec()
     }
 
     /// The rollout engine's move for dice `d1, d2` as `(result_board, equity)`,
     /// where equity is from the mover's perspective. Releases the GIL.
     fn best_move(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8) -> (PyBoard, f32) {
         let dice = Dice::new(d1, d2);
-        let (mv, eq) = py.allow_threads(|| {
-            let f = || bgengine::rollout_best_scored(&board.inner, &dice, &self.nn, &self.cfg);
-            match &self.pool {
-                Some(p) => p.install(f),
-                None => f(),
-            }
+        let (mv, eq) = py.allow_threads(|| match &self.eval {
+            RollEval::Single(nn) => ro_best(nn, &board.inner, &dice, &self.cfg, &self.pool),
+            RollEval::Phase(pe) => ro_best(pe, &board.inner, &dice, &self.cfg, &self.pool),
         });
-        (PyBoard { inner: mv.result }, eq)
+        (PyBoard { inner: mv }, eq)
     }
 }
 

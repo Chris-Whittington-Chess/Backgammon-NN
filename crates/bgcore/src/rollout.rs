@@ -39,6 +39,11 @@ pub struct RolloutConfig {
     pub movetime_ms: u64,
     /// Worker threads; `0` uses the global rayon pool (honours RAYON_NUM_THREADS).
     pub threads: usize,
+    /// Play race (no-contact) positions in the playout with the evaluator rather
+    /// than min-pip. Only sound with a race-competent evaluator (a phase net whose
+    /// race half is trained on races); with a plain contact net, leave `false` and
+    /// keep the min-pip fallback. Default `false`.
+    pub net_race: bool,
 }
 
 impl Default for RolloutConfig {
@@ -50,6 +55,7 @@ impl Default for RolloutConfig {
             seed: 0x5EED,
             movetime_ms: 0,
             threads: 0,
+            net_race: false,
         }
     }
 }
@@ -100,8 +106,8 @@ fn argmax(scores: &[f32]) -> usize {
 /// and off fastest, which minimising the resulting pip count does near-optimally
 /// (it also races the back checkers home to save the gammon when behind).
 /// Otherwise fall back to greedy 0-ply on the evaluator.
-fn pick_playout<E: Evaluator>(b: &Board, moves: &[Move], eval: &E) -> usize {
-    if b.no_contact() {
+fn pick_playout<E: Evaluator>(b: &Board, moves: &[Move], eval: &E, net_race: bool) -> usize {
+    if b.no_contact() && !net_race {
         let mut best_i = 0;
         let mut best = i32::MAX;
         for (i, m) in moves.iter().enumerate() {
@@ -118,7 +124,13 @@ fn pick_playout<E: Evaluator>(b: &Board, moves: &[Move], eval: &E) -> usize {
 
 /// One truncated playout from `board`, returning equity **from the perspective
 /// of `board`'s side to move**. Uses a 0-ply policy (greedy on `eval`).
-fn rollout_once<E: Evaluator>(board: &Board, eval: &E, truncate: usize, rng: &mut Rng) -> f32 {
+fn rollout_once<E: Evaluator>(
+    board: &Board,
+    eval: &E,
+    truncate: usize,
+    net_race: bool,
+    rng: &mut Rng,
+) -> f32 {
     let mut b = board.clone();
     let mut plies = 0usize;
     loop {
@@ -134,7 +146,7 @@ fn rollout_once<E: Evaluator>(board: &Board, eval: &E, truncate: usize, rng: &mu
         }
 
         let moves = genmoves(&b, &rng.roll());
-        let chosen = &moves[pick_playout(&b, &moves, eval)];
+        let chosen = &moves[pick_playout(&b, &moves, eval, net_race)];
         if let GameResult::MoverWins(p) = result(&chosen.result) {
             return sign * p as f32; // the side that just moved won
         }
@@ -157,7 +169,7 @@ pub fn rollout_equity<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &Rollou
         .into_par_iter()
         .map(|t| {
             let mut rng = Rng::new(cfg.seed.wrapping_add(t as u64 + 1).wrapping_mul(GOLDEN));
-            rollout_once(board, eval, cfg.truncate_plies, &mut rng)
+            rollout_once(board, eval, cfg.truncate_plies, cfg.net_race, &mut rng)
         })
         .sum();
     sum / cfg.trials as f32
@@ -176,7 +188,7 @@ fn rollout_timed<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutConf
             .into_par_iter()
             .map(|t| {
                 let mut rng = Rng::new(cfg.seed.wrapping_add(base + t + 1).wrapping_mul(GOLDEN));
-                rollout_once(board, eval, cfg.truncate_plies, &mut rng)
+                rollout_once(board, eval, cfg.truncate_plies, cfg.net_race, &mut rng)
             })
             .sum();
         total += s;
@@ -263,6 +275,7 @@ fn rollout_once_dist<E: Evaluator>(
     board: &Board,
     eval: &E,
     truncate: usize,
+    net_race: bool,
     rng: &mut Rng,
 ) -> [f32; 5] {
     let mut b = board.clone();
@@ -278,7 +291,7 @@ fn rollout_once_dist<E: Evaluator>(
             return orient([v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg], plies);
         }
         let moves = genmoves(&b, &rng.roll());
-        let chosen = &moves[pick_playout(&b, &moves, eval)];
+        let chosen = &moves[pick_playout(&b, &moves, eval, net_race)];
         if let GameResult::MoverWins(p) = result(&chosen.result) {
             return orient(win_vec(p), plies);
         }
@@ -308,7 +321,7 @@ pub fn rollout_dist<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutC
                 .into_par_iter()
                 .map(|t| {
                     let mut rng = Rng::new(cfg.seed.wrapping_add(base + t + 1).wrapping_mul(GOLDEN));
-                    rollout_once_dist(board, eval, cfg.truncate_plies, &mut rng)
+                    rollout_once_dist(board, eval, cfg.truncate_plies, cfg.net_race, &mut rng)
                 })
                 .reduce(|| [0.0; 5], add5);
             total = add5(total, s);
@@ -328,7 +341,7 @@ pub fn rollout_dist<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutC
         .into_par_iter()
         .map(|t| {
             let mut rng = Rng::new(cfg.seed.wrapping_add(t as u64 + 1).wrapping_mul(GOLDEN));
-            rollout_once_dist(board, eval, cfg.truncate_plies, &mut rng)
+            rollout_once_dist(board, eval, cfg.truncate_plies, cfg.net_race, &mut rng)
         })
         .reduce(|| [0.0; 5], add5);
     mean(sums, cfg.trials as f32)
