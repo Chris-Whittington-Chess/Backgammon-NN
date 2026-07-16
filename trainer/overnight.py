@@ -63,6 +63,8 @@ def main():
     ap.add_argument("--hours", type=float, default=10.0, help="wall-clock budget")
     ap.add_argument("--hidden", default="256,128,128")
     ap.add_argument("--act", default="sqrelu")
+    ap.add_argument("--proj", type=int, default=0,
+                    help="product-pool projection width (even); 0 = plain MLP")
     ap.add_argument("--games", type=int, default=200, help="self-play games per iter")
     ap.add_argument("--chunk", type=int, default=120, help="iters between tests")
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -100,6 +102,8 @@ def main():
                "--lam", "1.0", "--lr", str(args.lr),
                "--bench-every", str(max(1, args.chunk // 2)), "--bench-games", "300",
                "--out", args.out]
+        if args.proj:
+            cmd += ["--proj", str(args.proj)]
         if ckpt.exists():
             cmd += ["--resume", args.out]
         t0 = time.time()

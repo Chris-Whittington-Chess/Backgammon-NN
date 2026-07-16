@@ -28,21 +28,49 @@ def _activation(name: str) -> nn.Module:
     return {"relu": nn.ReLU, "sqrelu": SquaredReLU}[name]()
 
 
-class ValueNet(nn.Module):
-    """198 -> hidden layer(s) -> 5 (sigmoid) probability head.
+class ProductPool(nn.Module):
+    """Split the input in two halves, ReLU each, multiply elementwise.
 
-    `hidden` is an ``int`` for one hidden layer (e.g. ``128``) or a list for a
-    deeper net (e.g. ``[256, 128]``). Layer indices are unchanged for the
-    single-layer ReLU case, so older 198->128->5 checkpoints still load. Widths
-    that are multiples of 8/16/32 (128, 256) also tile cleanly for SIMD.
-    `act` is ``"relu"`` or ``"sqrelu"`` (ReLU squared).
+    A bilinear / multiplicative unit — the pairwise-product trick from modern
+    chess NNUE. A projection to ``2d`` becomes ``d`` features carrying degree-2
+    interactions of the inputs, which a plain additive (Linear+ReLU) net can only
+    approximate with many neurons. Backgammon's value function is full of such
+    products (hit chance ≈ "I have a blot" × "opponent bears on it").
+
+    ReLU on each half *before* the product bounds it away from the runaway
+    magnitudes an unbounded activation (e.g. squared-ReLU) on the product would
+    give. Exports to ONNX as ``Split`` + ``Relu`` + ``Mul`` — all tract ops.
     """
 
-    def __init__(self, hidden=128, act: str = "relu"):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        a, b = x.chunk(2, dim=-1)
+        return torch.relu(a) * torch.relu(b)
+
+
+class ValueNet(nn.Module):
+    """198 -> [optional product pool] -> hidden layer(s) -> 5 (sigmoid) head.
+
+    `hidden` is an ``int`` for one hidden layer (e.g. ``128``) or a list for a
+    deeper net (e.g. ``[256, 128]``); ``[]`` means straight from the pool/inputs
+    to the output. Layer indices are unchanged for the single-layer ReLU case, so
+    older 198->128->5 checkpoints still load. Widths that are multiples of
+    8/16/32 tile cleanly for SIMD. `act` is ``"relu"`` or ``"sqrelu"``.
+
+    `proj` (even, e.g. 512) inserts a `Linear(198, proj)` -> [`ProductPool`] first,
+    so the hidden tail starts from `proj // 2` multiplicative features. `None`
+    (default) is the plain MLP, unchanged.
+    """
+
+    def __init__(self, hidden=128, act: str = "relu", proj=None):
         super().__init__()
         sizes = [hidden] if isinstance(hidden, int) else list(hidden)
         layers = []
         prev = NUM_INPUTS
+        if proj is not None:
+            if proj % 2 != 0:
+                raise ValueError(f"proj must be even (split in two), got {proj}")
+            layers += [nn.Linear(NUM_INPUTS, proj), ProductPool()]
+            prev = proj // 2
         for h in sizes:
             layers += [nn.Linear(prev, h), _activation(act)]
             prev = h
@@ -55,7 +83,7 @@ class ValueNet(nn.Module):
 
 def net_from_ckpt(ck) -> "ValueNet":
     """Rebuild the exact architecture recorded in a checkpoint dict."""
-    net = ValueNet(ck.get("hidden", 128), ck.get("act", "relu"))
+    net = ValueNet(ck.get("hidden", 128), ck.get("act", "relu"), ck.get("proj"))
     net.load_state_dict(ck["model"])
     net.eval()
     return net
