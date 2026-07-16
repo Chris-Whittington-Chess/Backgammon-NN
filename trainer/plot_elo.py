@@ -1,15 +1,18 @@
 """Plot an estimated Elo ladder for the engines (SPEC §13).
 
 Elo is derived by chaining measured head-to-head win rates, anchoring Random at
-0. Each rung uses one real match result:
+0. Each rung uses one real match result for the current live net
+(198-256-128-128-5 sqrelu, 2M self-play games):
     Random -> HCE   : HCE wins 99.5%
-    HCE    -> NN     : NN wins 81.1% (0-ply)
-    NN0    -> NN1    : 1-ply wins 62.5% over 0-ply
-    NN1    -> NN2    : 2-ply wins <benchmark> over 1-ply
+    HCE    -> NN     : NN wins 88.8% (0-ply, 1000 games)
+    NN0    -> NN1    : 1-ply wins 55.5% over 0-ply (200 games)
+    NN1    -> NN2    : 2-ply wins over 1-ply (nn_bench)
 
-Backgammon win rates compress toward 50% because of dice luck, so these Elo gaps
-are approximate; the points-per-game gaps are larger (NN averages ~+1.4 ppg vs
-HCE). Run: .venv/Scripts/python trainer/plot_elo.py [out.png]
+Note the search rungs shrink as the net improves: a stronger static evaluator
+leaves search less to add (1-ply over 0-ply fell 62.5% -> 55.5% between net
+generations). Backgammon win rates compress toward 50% because of dice luck, so
+these Elo gaps are approximate; points-per-game gaps are larger (NN averages
+~+1.5 ppg vs HCE). Run: .venv/Scripts/python trainer/plot_elo.py [out.png]
 """
 
 from __future__ import annotations
@@ -32,11 +35,11 @@ def elo_gap(win_rate: float) -> float:
     return 400.0 * math.log10(win_rate / (1.0 - win_rate))
 
 
-# Measured head-to-head win rates (winner listed first).
-HCE_VS_RANDOM = 0.995
-NN0_VS_HCE = 0.811
-NN1_VS_NN0 = 0.625
-NN2_VS_NN1 = 0.583  # 60 games, ±12.5 — point estimate, wide interval
+# Measured head-to-head win rates (winner listed first), current live net.
+HCE_VS_RANDOM = 0.995        # unchanged — HCE and Random are fixed baselines
+NN0_VS_HCE = 0.888           # nn_bench, 1000 games, ±2.0
+NN1_VS_NN0 = 0.555           # nn_bench, 200 games, ±6.9
+NN2_VS_NN1 = 0.550           # nn_bench, 60 games, ±12.6 — wide interval
 
 random_elo = 0.0
 hce_elo = random_elo + elo_gap(HCE_VS_RANDOM)
@@ -44,7 +47,8 @@ nn0_elo = hce_elo + elo_gap(NN0_VS_HCE)
 nn1_elo = nn0_elo + elo_gap(NN1_VS_NN0)
 nn2_elo = nn1_elo + elo_gap(NN2_VS_NN1)
 
-labels = ["Random", "HCE", "NN-600\n(0-ply)", "NN-600\n(1-ply)", "NN-600\n(2-ply)"]
+labels = ["Random", "HCE", "Neural net\n(0-ply)", "Neural net\n(1-ply)",
+          "Neural net\n(2-ply)"]
 elos = [random_elo, hce_elo, nn0_elo, nn1_elo, nn2_elo]
 colors = ["#8a8f98", "#d08a34", "#2f6f8f", "#2f8f77", "#2f8f4f"]
 
