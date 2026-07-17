@@ -9,6 +9,22 @@ Downloads: [Releases](../../releases). The app is a single self-contained
 
 ---
 
+## Bucketed net promoted (SF-style pip-count output buckets)
+
+- The live net is now a **Stockfish-NNUE-style output-bucketed** net: one shared
+  198→256→128 body, **8 output heads** selected by total pip count, each a
+  six-outcome softmax. The body trains on every position; only the selected head
+  specialises — no data starvation, unlike separate per-phase nets.
+- Trained 1M self-play games; **beats the 256-128-128 champion 52.6%** head-to-head
+  at 0-ply (z 3.65 over 4,800 games), 56.8% on the final net with mirrored dice,
+  and **holds at 1-ply** (53%, PPG +0.14). vs HCE ~90%, matching the old champion.
+- Bucket edges calibrated to the octiles of champion self-play (even population).
+  The Rust engine reads the 48-output net and slices the position's pip bucket;
+  the live-net parity test is now architecture-agnostic (folded Value). Outgoing
+  champion kept as `models/td_256-128-128.pt`.
+- Also fixes an engine-move **animation glitch** where the moving checker was drawn
+  twice (static at its source and flying), so the source copy vanished on landing.
+
 ## Deeper net promoted (256-128-128)
 
 - The live net gains a third hidden layer: **198→256→128→128→5**, squared-ReLU,

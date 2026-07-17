@@ -20,7 +20,9 @@ venv/
 /models/*.pt
 !/models/td_latest.pt
 !/models/td_phase.pt
+!/models/td_bucket.pt
 !/models/td_256-128_champion.pt
+!/models/td_256-128-128.pt
 /models/*.onnx
 !/models/td.onnx
 !/models/td_race.onnx

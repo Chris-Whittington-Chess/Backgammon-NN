@@ -201,8 +201,10 @@ mod tests {
 
     #[test]
     fn tract_matches_pytorch_on_fixture() {
-        // Requires `trainer/export_onnx.py` to have produced td.onnx + parity.json.
-        // Skips gracefully if the artifacts are absent.
+        // Live-net cross-language check: tract's folded Value for the starting
+        // position must match parity.json's expected_output, whatever architecture
+        // td.onnx currently is (5-output, 6-output, or bucketed — the export
+        // scripts write the folded Value). Skips gracefully if artifacts absent.
         let onnx_path = format!("{MODELS}/td.onnx");
         let fixture_path = format!("{MODELS}/parity.json");
         if !std::path::Path::new(&onnx_path).exists()

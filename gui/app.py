@@ -704,12 +704,18 @@ class MainWindow(QMainWindow):
         if hasattr(bgcore, "Neural") and onnx_path.exists():
             neurals = [NativeNeuralEngine(onnx_path, lookahead=p) for p in (0, 1, 2)]
         elif ckpt.exists():
-            neural0 = NeuralEngine(ckpt, lookahead=0)
-            neurals = [
-                neural0,
-                NeuralEngine(ckpt, lookahead=1, share=neural0),
-                NeuralEngine(ckpt, lookahead=2, share=neural0),
-            ]
+            # Torch fallback for onnx-less source checkouts. The simple
+            # NeuralEngine only handles a plain 5-output ValueNet; a bucketed or
+            # phase checkpoint needs the native path, so skip rather than crash.
+            try:
+                neural0 = NeuralEngine(ckpt, lookahead=0)
+                neurals = [
+                    neural0,
+                    NeuralEngine(ckpt, lookahead=1, share=neural0),
+                    NeuralEngine(ckpt, lookahead=2, share=neural0),
+                ]
+            except Exception:
+                neurals = []
         if neurals:
             for e in neurals:
                 self.opponents[e.name] = e

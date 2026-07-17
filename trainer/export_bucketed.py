@@ -78,6 +78,18 @@ def main():
     }, indent=2))
     print("wrote parity_bucket.json")
 
+    # Also refresh the live-net fixture (parity.json) with the *folded* Value, so
+    # the architecture-agnostic live-net Rust test verifies whatever td.onnx is:
+    # 6-outcome probs -> nested [win, win_g, win_bg, lose_g, lose_bg].
+    ws, wg, wbg, ls, lg, lbg = (float(x) for x in probs)
+    folded = [ws + wg + wbg, wg + wbg, wbg, lg + lbg, lbg]
+    (MODELS / "parity.json").write_text(json.dumps({
+        "position_id": "4HPwATDgc/ABMA",
+        "features": [float(x) for x in feats[0]],
+        "expected_output": folded,
+    }, indent=2))
+    print("wrote parity.json (folded Value for the live-net test)")
+
 
 if __name__ == "__main__":
     main()
