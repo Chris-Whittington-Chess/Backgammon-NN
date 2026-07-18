@@ -19,7 +19,7 @@ Everything below is about making that net *stronger*.
 | 5 | Pip-count output buckets (SF-NNUE style, 8 heads) | ✅ **Win** — beat champion 52.6% @0-ply | **v1.7.0** |
 | 6 | Class-aware routing (race/crashed/contact, 12 heads) | ◐ Routing neutral; **LR-decay recipe** drove the gain | **v1.8.0** |
 | 7 | Richer input features (14 strategic, 198→212) | ❌ **Failed** — features aren't the lever | no |
-| 8 | Rollout-labeled supervised training | ⏳ **In progress** | — |
+| 8 | Rollout-labeled supervised training | ◐ **Parity** — matches champion with ~375× less data | no |
 
 ---
 
@@ -85,18 +85,32 @@ back-checkers-trapped, pip count — the gnubg-style hand-crafted inputs.
 from hand-crafted features (that's why shallow gnubg does), but ours doesn't — pointing
 the finger squarely at **training-signal quality**, not what the net sees.
 
-## 8. Rollout-labeled supervised training — ⏳ in progress
+## 8. Rollout-labeled supervised training — ◐ parity, not a win
 The through-line of experiments 6–7 is that **architecture and features have hit a
 ceiling**; gnubg's real edge is **rollout-quality training labels** (+ exact bearoff
-databases), not its net. We currently train on *game outcomes* — an extremely noisy label
-(one game's result for a mid-game position). gnubg trains on *rollouts* — a low-variance
+databases), not its net. We train on *game outcomes* — an extremely noisy label (one
+game's result for a mid-game position); gnubg trains on *rollouts* — a low-variance
 estimate of the true value.
 
-Now building: label a large position set (400k, across all 12 buckets) with the engine's
-own truncated rollouts, then supervised-train to a **soft/hard blend** target
-`α·rollout_distribution + (1−α)·onehot(game_outcome)` — distillation-from-search anchored
-by the unbiased outcome. Rollout labeling measured at ~26 pos/sec, so a large set is an
-overnight job. **Verdict pending** (judged at 1-ply).
+We labeled **400k positions** (across all 12 buckets, ~26 pos/sec = ~5h) with the engine's
+own truncated rollouts, then supervised-trained the class-aware net to a **soft/hard blend**
+`α·rollout_distribution + (1−α)·onehot(game_outcome)`.
+
+**Result: parity, not a win.** The best net (α=0.95) scores **49.4% vs the champion over
+3,000 games (z −0.66, dead 50/50)** and is *stronger* vs HCE (~94% vs ~89%). Two findings:
+- **Trust the rollouts.** Strength rose monotonically with α (0.5/0.75/0.9/0.95 →
+  37/43/47/~50%): the low-variance rollout label *is* the signal; the noisy game outcome
+  mostly re-adds the variance we're trying to escape, so α≈0.95 (barely anchored) wins.
+- **Label quality substitutes for compute.** It reached parity with the 3M-game self-play
+  champion from **400k supervised examples (~375× fewer positions)** — minutes of training
+  vs ~16h of self-play. The thesis holds; the *ceiling* of this dataset is champion-level,
+  though, because the labels use the champion as their rollout leaf. Exceeding it needs
+  **stronger labels** (untruncated / 2-ply-leaf rollouts) — the honest next lever.
+
+**Net verdict across 6–8:** routing (neutral), features (negative), rollout labels (parity)
+— none beats v1.8.0. The net is near a ceiling for this size/feature/regime; the real
+remaining strength is *structural* — an **exact bear-off database** and an absolute
+**gnubg benchmark** to locate the true headroom.
 
 ---
 
