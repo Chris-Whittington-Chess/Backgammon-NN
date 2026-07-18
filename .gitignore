@@ -34,6 +34,7 @@ venv/
 /models/*.log
 /models/*.png
 /models/*.md
+/models/*.npz
 /data/
 
 # Packaged app — built by packaging/build.py, published as a GitHub release
