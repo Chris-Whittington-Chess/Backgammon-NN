@@ -56,11 +56,12 @@ PySide6 GUI  ──►  Python (trainer + engine adapters)  ──PyO3──► 
 - **Move generation validated** against the wildbg reference engine across
   3.15M (position, dice) pairs — zero mismatches.
 - **198-input Tesauro encoding** and a **Stockfish-NNUE-style output-bucketed**
-  value net: a shared 198→256→128 body feeding **8 output heads** selected by
-  total pip count, each a six-outcome softmax (win/lose × single/gammon/backgammon).
-  Trained by self-play over **1M games**, it beats the previous 256-128-128 net
-  ~53% head-to-head — the shared body specialises per game-stage without the data
-  starvation of separate per-phase nets.
+  value net: a shared 198→256→128 body feeding **12 output heads** selected by
+  **gnubg-style position class** (race / crashed / contact) with total-pip
+  sub-buckets inside each, every head a six-outcome softmax (win/lose ×
+  single/gammon/backgammon). Trained by self-play over **3M games** with a
+  learning-rate decay; the shared body specialises per game-stage without the
+  data starvation of separate per-phase nets.
 - **Cross-language parity**: PyTorch → ONNX → Rust `tract` inference match to
   <1e-4.
 - **Expectiminimax search** to 2 ply with GNUbg-style candidate pruning, plus

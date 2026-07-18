@@ -184,15 +184,23 @@ def pip_bucket(total_pips: int) -> int:
     return sum(1 for e in PIP_BUCKET_EDGES if total_pips >= e)
 
 
-class ValueNetBucketed(nn.Module):
-    """Shared body -> N_BUCKETS x 6-outcome heads, one selected per position.
+# Class-aware routing: race / crashed / contact, each split into total-pip
+# sub-buckets (3 + 2 + 7 = 12 heads). The routing itself is the single-source-of-
+# truth `Board.route_bucket()` in Rust (crates/bgcore/src/board.rs) — Python just
+# calls it — so there are no edge constants to keep in sync here.
+N_HEADS = 12
 
-    `forward` returns all heads' logits, shape ``[..., N_BUCKETS, 6]``. Training
-    gathers the per-sample bucket; inference (Rust) runs all heads and slices the
-    one for the position's total-pip bucket. Same body shape as ValueNet6.
+
+class ValueNetBucketed(nn.Module):
+    """Shared body -> ``n_heads`` x 6-outcome heads, one selected per position.
+
+    `forward` returns all heads' logits, shape ``[..., n_heads, 6]``. Training
+    gathers the per-sample head; inference (Rust) runs all heads and slices the one
+    the position routes to. ``n_heads`` defaults to the total-pip layout
+    (`N_BUCKETS` = 8); the class-aware net uses `N_HEADS` = 12. Same body as ValueNet6.
     """
 
-    def __init__(self, hidden=(256, 128), act: str = "relu"):
+    def __init__(self, hidden=(256, 128), act: str = "relu", n_heads: int = N_BUCKETS):
         super().__init__()
         sizes = [hidden] if isinstance(hidden, int) else list(hidden)
         layers = []
@@ -201,24 +209,27 @@ class ValueNetBucketed(nn.Module):
             layers += [nn.Linear(prev, h), _activation(act)]
             prev = h
         self.body = nn.Sequential(*layers)
-        self.heads = nn.Linear(prev, N_BUCKETS * NUM_OUTCOMES)   # 8 * 6 = 48
+        self.n_heads = n_heads
+        self.heads = nn.Linear(prev, n_heads * NUM_OUTCOMES)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.body(x)
-        return self.heads(h).view(*h.shape[:-1], N_BUCKETS, NUM_OUTCOMES)
+        return self.heads(h).view(*h.shape[:-1], self.n_heads, NUM_OUTCOMES)
 
     def logits_for(self, x: torch.Tensor, buckets: torch.Tensor) -> torch.Tensor:
         """Per-sample selected head logits, ``[N, 6]``. `buckets` is a LongTensor
-        of bucket indices."""
-        out = self.forward(x)                                   # [N, 8, 6]
+        of head indices."""
+        out = self.forward(x)                                   # [N, n_heads, 6]
         return out[torch.arange(out.size(0)), buckets]          # [N, 6]
 
     def probs_for(self, x: torch.Tensor, buckets: torch.Tensor) -> torch.Tensor:
         return torch.softmax(self.logits_for(x, buckets), dim=-1)
 
 
-def net_bucketed_from_state(sd, hidden, act) -> "ValueNetBucketed":
-    net = ValueNetBucketed(hidden, act)
+def net_bucketed_from_state(sd, hidden, act, n_heads: int = None) -> "ValueNetBucketed":
+    if n_heads is None:  # infer from the head layer's width
+        n_heads = sd["heads.weight"].shape[0] // NUM_OUTCOMES
+    net = ValueNetBucketed(hidden, act, n_heads)
     net.load_state_dict(sd)
     net.eval()
     return net

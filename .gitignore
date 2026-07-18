@@ -23,11 +23,17 @@ venv/
 !/models/td_bucket.pt
 !/models/td_256-128_champion.pt
 !/models/td_256-128-128.pt
+!/models/td_bucket_champion.pt
 /models/*.onnx
 !/models/td.onnx
 !/models/td_race.onnx
 !/models/td_contact.onnx
 /models/*.json
+# Transient training/benchmark logs and plots dropped in models/
+/models/*.txt
+/models/*.log
+/models/*.png
+/models/*.md
 /data/
 
 # Packaged app — built by packaging/build.py, published as a GitHub release

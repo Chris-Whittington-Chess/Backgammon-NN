@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from model import NUM_INPUTS, N_BUCKETS, OUTCOME_POINTS, net_bucketed_from_state, pip_bucket
+from model import NUM_INPUTS, N_BUCKETS, N_HEADS, OUTCOME_POINTS, net_bucketed_from_state, pip_bucket
 
 MODELS = Path(__file__).resolve().parent.parent / "models"
 
@@ -63,10 +63,12 @@ def main():
     rt = sess.run(None, {"input": feats})[0][0]
     diff = float(np.abs(py - rt).max())
 
-    bucket = pip_bucket(start.pip_count(0) + start.pip_count(1))
+    class_aware = net.n_heads == N_HEADS
+    bucket = start.route_bucket() if class_aware else pip_bucket(start.pip_count(0) + start.pip_count(1))
     probs = rt[bucket * 6:bucket * 6 + 6]
     pts = np.array(OUTCOME_POINTS, dtype=np.float32)
-    print(f"exported {out} (bucketed, iter {ck.get('iter')}, {N_BUCKETS} buckets)")
+    kind = "class-aware" if class_aware else "total-pip"
+    print(f"exported {out} ({kind} bucketed, iter {ck.get('iter')}, {net.n_heads} heads)")
     print(f"PyTorch vs ONNXRuntime max abs diff: {diff:.2e}")
     print(f"start bucket {bucket}  probs {np.round(probs, 4)}  sum {probs.sum():.4f}"
           f"  equity {float((probs*pts).sum()):+.4f}")

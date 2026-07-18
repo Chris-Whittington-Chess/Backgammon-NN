@@ -81,6 +81,19 @@ impl PyBoard {
         self.inner.no_contact()
     }
 
+    /// gnubg's "crashed" classification (either side): a contact position where a
+    /// side has at most 6 checkers not buried on its 1- and 2-points.
+    fn crashed(&self) -> bool {
+        self.inner.crashed()
+    }
+
+    /// The class-aware output head for this position (0..12): race / crashed /
+    /// contact, each split into total-pip sub-buckets. Single source of truth for
+    /// routing, shared by training and native inference.
+    fn route_bucket(&self) -> usize {
+        self.inner.route_bucket()
+    }
+
     /// This position viewed from the opponent's side (turn passed).
     fn swap_perspective(&self) -> PyBoard {
         PyBoard {

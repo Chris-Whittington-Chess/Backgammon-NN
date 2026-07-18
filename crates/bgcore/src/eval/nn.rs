@@ -23,6 +23,11 @@ type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Bo
 const PIP_BUCKET_EDGES: [i32; 7] = [85, 131, 169, 205, 238, 271, 305];
 const N_BUCKETS: usize = PIP_BUCKET_EDGES.len() + 1; // 8
 
+/// Output heads of the newer **class-aware** bucketed net: race / crashed /
+/// contact, each split into total-pip sub-buckets. Routing lives on the board
+/// ([`Board::route_bucket`]); a net of width `N_HEADS*6` selects that head.
+const N_HEADS: usize = crate::board::N_ROUTE_HEADS; // 12
+
 /// Total-pip bucket for `board` (both sides): the number of edges it meets or
 /// exceeds. Perspective-invariant, so a board and its swap share a bucket.
 fn pip_bucket(board: &Board) -> usize {
@@ -92,19 +97,22 @@ impl NnEval {
         self.outputs
     }
 
-    /// Whether this is a pip-count-bucketed net (`N_BUCKETS` heads of 6).
-    fn bucketed(&self) -> bool {
-        self.outputs == N_BUCKETS * 6
-    }
-
-    /// Fold one position's raw output row into a [`Value`], selecting the
-    /// total-pip bucket's 6 outputs first when the net is bucketed.
+    /// Fold one position's raw output row into a [`Value`], selecting the routed
+    /// head's 6 outputs first for a bucketed net. The routing is chosen by output
+    /// width: `N_HEADS*6` is the class-aware net (race/crashed/contact via
+    /// [`Board::route_bucket`]); `N_BUCKETS*6` is the older total-pip net; anything
+    /// else (5 or 6) is a single head folded directly.
     fn fold(&self, row: &[f32], board: &Board) -> Value {
-        if self.bucketed() {
-            let b = pip_bucket(board);
-            row_to_value(&row[b * 6..b * 6 + 6])
-        } else {
-            row_to_value(row)
+        match self.outputs {
+            n if n == N_HEADS * 6 => {
+                let b = board.route_bucket();
+                row_to_value(&row[b * 6..b * 6 + 6])
+            }
+            n if n == N_BUCKETS * 6 => {
+                let b = pip_bucket(board);
+                row_to_value(&row[b * 6..b * 6 + 6])
+            }
+            _ => row_to_value(row),
         }
     }
 

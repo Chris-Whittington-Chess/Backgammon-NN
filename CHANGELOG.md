@@ -9,6 +9,24 @@ Downloads: [Releases](../../releases). The app is a single self-contained
 
 ---
 
+## v1.8.0 — class-aware value net (race / crashed / contact)
+
+- The live net now routes its output heads by **gnubg-style position class** —
+  race, crashed, contact — with total-pip sub-buckets inside each (**12 heads**),
+  instead of pip count alone (8). "Crashed" is gnubg's exact definition: a side
+  with at most 6 checkers not buried on its own 1- and 2-points. Routing
+  (`Board::route_bucket`) is one source of truth shared by Rust inference and
+  Python training; the engine reads the 12-head net and slices the routed head.
+- Trained **3M self-play games** with a linear learning-rate decay (1e-3 → 1e-4).
+- **Honest strength picture.** It beats the previous 8-bucket net **decisively at
+  0-ply (55.8%, z 6.4)** but only **~52% at 1-ply (within noise)** — the
+  static-evaluation gain largely washes out once both sides search. So it's a
+  clear upgrade as the rollout *leaf* evaluator and no worse under search, but not
+  the breakthrough the class split might suggest: at equal training the routing
+  was a wash, and the measured gain came from the LR-decay recipe, not the
+  race/crashed/contact split itself. Previous champion kept as
+  `models/td_bucket_champion.pt`.
+
 ## Bucketed net promoted (SF-style pip-count output buckets)
 
 - The live net is now a **Stockfish-NNUE-style output-bucketed** net: one shared

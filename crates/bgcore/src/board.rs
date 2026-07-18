@@ -16,6 +16,24 @@ pub const BAR_PIPS: i32 = 25;
 pub const MOVER: usize = 0;
 pub const OPP: usize = 1;
 
+// --- Class-aware output-head routing (SPEC: the class-bucketed value net) -----
+// Positions are split by gnubg's classes — race / crashed / contact — then into
+// total-pip sub-buckets calibrated for even population (trainer/measure_classes.py).
+// [`Board::route_bucket`] maps a position to one of `N_ROUTE_HEADS` heads; the net
+// emits a 6-outcome softmax per head and the engine slices the selected one. Head
+// order: race `[0..3)`, crashed `[3..5)`, contact `[5..12)`. Keep these edges and
+// the layout identical to `route_bucket` / `N_HEADS` in `trainer/model.py`.
+/// Number of output heads for the class-aware bucketed net.
+pub const N_ROUTE_HEADS: usize = 12;
+/// Within-race total-pip edges (3 race heads).
+const RACE_EDGES: [i32; 2] = [57, 96];
+/// Within-crashed total-pip edge (2 crashed heads).
+const CRASHED_EDGES: [i32; 1] = [127];
+/// Within-contact total-pip edges (7 contact heads).
+const CONTACT_EDGES: [i32; 6] = [168, 202, 232, 259, 284, 309];
+const CRASHED_BASE: usize = RACE_EDGES.len() + 1; // 3
+const CONTACT_BASE: usize = CRASHED_BASE + CRASHED_EDGES.len() + 1; // 5
+
 /// A backgammon position, stored from the side-to-move's perspective.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Board {
@@ -199,6 +217,55 @@ impl Board {
         }
     }
 
+    /// gnubg's "crashed" classification (either side): a side with at most 6
+    /// checkers not buried on its own 1- and 2-points. Verbatim port of gnubg's
+    /// `ClassifyPosition` test (`N = 6`). Non-cyclic — every successor of a crashed
+    /// position is also crashed. This is meaningful only for contact positions; a
+    /// pure race is never "crashed" (see [`Board::route_bucket`], which gates it on
+    /// contact). Perspective-invariant, since it checks *both* sides.
+    pub fn crashed(&self) -> bool {
+        const N: i32 = 6;
+        for side in [MOVER, OPP] {
+            // Checkers still on the board (not borne off), including the bar.
+            let tot = CHECKERS_PER_SIDE - self.off[side] as i32;
+            // That side's ace(1)- and two(2)-point counts. The opponent is stored
+            // negated in the mover's frame, so their ace/2 are the high points 24/23.
+            let (ace, two) = if side == MOVER {
+                (self.points[1].max(0) as i32, self.points[2].max(0) as i32)
+            } else {
+                ((-self.points[24]).max(0) as i32, (-self.points[23]).max(0) as i32)
+            };
+            let side_crashed = if tot <= N {
+                true
+            } else if ace > 1 {
+                tot <= N + ace || (two > 1 && (1 + tot - ace - two) <= N)
+            } else {
+                tot <= N + (two - 1)
+            };
+            if side_crashed {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The output head for this position under class-aware routing
+    /// (`0..N_ROUTE_HEADS`). Race first (armies passed), else crashed, else
+    /// contact; within each class, a total-pip sub-bucket. Total pips are
+    /// perspective-invariant, so a board and its swap share a head and equity stays
+    /// antisymmetric. Must match `route_bucket` in `trainer/model.py`.
+    pub fn route_bucket(&self) -> usize {
+        let total = self.pip_count(MOVER) + self.pip_count(OPP);
+        let sub = |edges: &[i32]| edges.iter().filter(|&&e| total >= e).count();
+        if self.no_contact() {
+            sub(&RACE_EDGES) // 0..3
+        } else if self.crashed() {
+            CRASHED_BASE + sub(&CRASHED_EDGES) // 3..5
+        } else {
+            CONTACT_BASE + sub(&CONTACT_EDGES) // 5..12
+        }
+    }
+
     /// True if point `to` (`1..=24`) is blocked for the mover, i.e. held by two
     /// or more opponent checkers.
     #[inline]
@@ -299,6 +366,40 @@ mod tests {
         assert!(b.has_won(MOVER));
         assert!(b.is_terminal());
         assert!(!b.has_won(OPP));
+    }
+
+    #[test]
+    fn starting_position_routes_to_top_contact_head() {
+        // Opening: 334 total pips, in contact, not crashed -> top contact head (11).
+        let b = Board::starting_position();
+        assert!(!b.crashed());
+        assert!(!b.no_contact());
+        assert_eq!(b.route_bucket(), N_ROUTE_HEADS - 1);
+    }
+
+    #[test]
+    fn crashed_position_routes_to_crashed_head() {
+        // Mover has borne off 9 (6 left on the 6-point => tot=6 <= N, crashed), and
+        // an opponent checker sits deep enough to keep contact.
+        let mut b = Board::empty();
+        b.set_point(6, 6); // mover: 6 checkers on the 6-point
+        b.set_off(MOVER, 9);
+        b.set_point(3, -2); // opponent back checker: opp_min(3) <= mover_max(6) => contact
+        b.set_off(OPP, 13);
+        assert!(b.crashed(), "tot=6 should be crashed");
+        assert!(!b.no_contact(), "should still be in contact");
+        let h = b.route_bucket();
+        assert!((CRASHED_BASE..CONTACT_BASE).contains(&h), "crashed head range, got {h}");
+    }
+
+    #[test]
+    fn raced_position_routes_to_race_head() {
+        // Armies passed (mover rearmost below opponent rearmost) -> race, low heads.
+        let mut b = Board::empty();
+        b.set_point(2, 2); // mover_max = 2
+        b.set_point(20, -2); // opp_min = 20, so 2 < 20 => no contact
+        assert!(b.no_contact());
+        assert!(b.route_bucket() < CRASHED_BASE, "race heads are [0, {CRASHED_BASE})");
     }
 
     #[test]
