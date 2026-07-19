@@ -32,7 +32,7 @@ pub use game::{
 };
 pub use moves::{genmoves, next_submoves, Move, Step, SubMove, BAR, OFF};
 pub use rollout::{
-    build_pool, rollout_best, rollout_best_scored, rollout_dist, rollout_equity, RolloutConfig,
-    RolloutEngine,
+    build_pool, rollout_best, rollout_best_scored, rollout_dist, rollout_dist_wave, rollout_equity,
+    RolloutConfig, RolloutEngine,
 };
 pub use search::{position_value, score_moves, SearchEngine};

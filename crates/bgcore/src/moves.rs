@@ -275,6 +275,161 @@ fn gen_single(board: &Board, die: u8) -> Vec<(Step, Board)> {
     out
 }
 
+// --- Fast playout move generation (rollout hot path) -----------------------
+//
+// The rollout only needs the RESULTING BOARDS to pick a move; it never reads a
+// move's step history, and two dice orderings that reach the same board don't
+// change an argmax or a min-pip pick. So `genmoves_playout` drops both the
+// `Vec<Step>` bookkeeping and the `HashSet` dedup that `genmoves` needs, carries
+// the remaining dice as a `Copy` count-multiset instead of reallocating a `Vec`
+// per recursion level, and fills a caller-reused buffer. Legal-move-equivalent
+// to `genmoves` (proven by `playout_gen_matches_genmoves`), just far cheaper.
+
+/// A dice roll as a count multiset over faces 1..=6 — `Copy`, heap-free, so the
+/// playout recursion carries it by value instead of allocating per level.
+#[derive(Clone, Copy)]
+struct DiceBag([u8; 7]);
+
+impl DiceBag {
+    #[inline]
+    fn from_dice(dice: &Dice) -> Self {
+        let mut c = [0u8; 7];
+        let (a, b) = dice.pair();
+        if dice.is_double() {
+            c[a as usize] = 4;
+        } else {
+            c[a as usize] += 1;
+            c[b as usize] += 1;
+        }
+        DiceBag(c)
+    }
+}
+
+/// Like [`gen_single`] but invokes `f` with each resulting board, allocating
+/// nothing (no `Vec`, no `Step`). Relies on `Board: Copy`.
+fn for_each_single(board: &Board, die: u8, mut f: impl FnMut(Board)) {
+    use crate::board::{MOVER, NUM_POINTS};
+
+    // Bar re-entry takes precedence over every other move.
+    if board.bar(MOVER) > 0 {
+        let to = 25 - die as usize;
+        if !board.is_blocked_for_mover(to) {
+            let mut child = *board;
+            child.enter_from_bar(to);
+            f(child);
+        }
+        return;
+    }
+
+    let all_home = board.mover_all_home();
+    let highest = board.highest_mover_point();
+
+    for p in 1..=NUM_POINTS {
+        if board.point(p) <= 0 {
+            continue;
+        }
+        let dest = p as i32 - die as i32;
+        if dest >= 1 {
+            let to = dest as usize;
+            if !board.is_blocked_for_mover(to) {
+                let mut child = *board;
+                child.move_checker(p, to);
+                f(child);
+            }
+        } else if all_home {
+            let exact = dest == 0;
+            if exact || p == highest {
+                let mut child = *board;
+                child.bear_off_checker(p);
+                f(child);
+            }
+        }
+    }
+}
+
+/// The maximum number of dice from `bag` playable from `board` (alloc-free
+/// analogue of `max_completion`, used to enforce the maximal-use rule).
+fn max_used(board: &Board, bag: DiceBag) -> usize {
+    let mut best = 0usize;
+    for d in 1..=6u8 {
+        if bag.0[d as usize] == 0 {
+            continue;
+        }
+        let mut b2 = bag;
+        b2.0[d as usize] -= 1;
+        for_each_single(board, d, |child| {
+            let c = 1 + max_used(&child, b2);
+            if c > best {
+                best = c;
+            }
+        });
+    }
+    best
+}
+
+/// Emit every board reachable by playing exactly `depth_left` more dice from
+/// `bag`. Paths that dead-end early simply contribute nothing, so calling this
+/// with `depth_left == max_used` yields exactly the maximal-use turn results.
+fn emit_playout(board: &Board, bag: DiceBag, depth_left: usize, out: &mut Vec<Board>) {
+    if depth_left == 0 {
+        out.push(*board);
+        return;
+    }
+    for d in 1..=6u8 {
+        if bag.0[d as usize] == 0 {
+            continue;
+        }
+        let mut b2 = bag;
+        b2.0[d as usize] -= 1;
+        for_each_single(board, d, |child| emit_playout(&child, b2, depth_left - 1, out));
+    }
+}
+
+/// Fast playout move generation: fills `out` with every distinct resulting board
+/// that uses the maximum number of dice (larger-die rule applied), WITHOUT step
+/// history. Correct for choosing a rollout move, NOT for move enumeration (no
+/// `Move`/steps) — use [`genmoves`] there. `out` is cleared then filled; reuse it
+/// across calls.
+///
+/// Results ARE de-duplicated: the two orderings of a non-double, and the many
+/// orderings of a double, mostly reach the same board, and feeding those
+/// duplicate boards through the net evaluator in `pick_playout` is the dominant
+/// cost — far more than the dedup itself.
+pub fn genmoves_playout(board: &Board, dice: &Dice, out: &mut Vec<Board>) {
+    out.clear();
+    let bag = DiceBag::from_dice(dice);
+    let m = max_used(board, bag);
+
+    // Dance: no die can be played -> a single pass move.
+    if m == 0 {
+        out.push(*board);
+        return;
+    }
+
+    // Larger-die rule: when only one of two distinct dice can be played, it must
+    // be the larger playable one. Emit only that die's single moves.
+    if m == 1 && !dice.is_double() {
+        for d in (1..=6u8).rev() {
+            if bag.0[d as usize] == 0 {
+                continue;
+            }
+            let before = out.len();
+            for_each_single(board, d, |child| out.push(child));
+            if out.len() > before {
+                break; // larger die playable -> those are the only legal moves
+            }
+        }
+    } else {
+        emit_playout(board, bag, m, out);
+    }
+
+    // De-duplicate identical results (order-preserving, first seen kept).
+    if out.len() > 1 {
+        let mut seen: HashSet<Board> = HashSet::with_capacity(out.len());
+        out.retain(|&b| seen.insert(b));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +625,41 @@ mod tests {
             for c in 1..=6u8 {
                 for m in genmoves(&b, &Dice::new(a, c)) {
                     assert!(m.result.validate().is_ok());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn playout_gen_matches_genmoves() {
+        // The step-free playout generator must produce exactly the same SET of
+        // resulting boards as genmoves (which dedups; playout may repeat),
+        // across varied positions and all 21 dice.
+        let boards = [
+            Board::starting_position(),
+            // contact mid-game
+            fixture(
+                &[(6, 4), (8, 3), (13, 5), (24, 3)],
+                &[(1, 3), (12, 5), (17, 3), (19, 4)],
+                0, 0, 0, 0,
+            ),
+            // bear-off
+            fixture(&[(1, 2)], &[(24, 15)], 0, 0, 13, 0),
+            // on the bar
+            fixture(&[(6, 14)], &[(20, 2), (24, 13)], 1, 0, 0, 0),
+            // race (no contact)
+            fixture(&[(1, 4), (2, 4), (3, 4)], &[(22, 4), (23, 4), (24, 4)], 0, 0, 3, 3),
+        ];
+        let mut buf = Vec::new();
+        for b in &boards {
+            for a in 1..=6u8 {
+                for c in a..=6u8 {
+                    let dice = Dice::new(a, c);
+                    let full: HashSet<Board> =
+                        genmoves(b, &dice).into_iter().map(|m| m.result).collect();
+                    genmoves_playout(b, &dice, &mut buf);
+                    let fast: HashSet<Board> = buf.iter().copied().collect();
+                    assert_eq!(full, fast, "mismatch for dice {a}-{c}");
                 }
             }
         }

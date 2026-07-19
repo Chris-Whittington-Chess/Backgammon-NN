@@ -20,7 +20,7 @@ use crate::board::Board;
 use crate::dice::{Dice, Rng};
 use crate::eval::Evaluator;
 use crate::game::{result, Engine, GameResult};
-use crate::moves::{genmoves, Move};
+use crate::moves::{genmoves, genmoves_playout, Move};
 use rayon::prelude::*;
 
 /// Parameters for a rollout.
@@ -122,6 +122,50 @@ fn pick_playout<E: Evaluator>(b: &Board, moves: &[Move], eval: &E, net_race: boo
     argmax(&shallow_scores(moves, eval))
 }
 
+/// `shallow_scores` over resulting boards directly (the playout hot path uses
+/// `genmoves_playout`, which yields boards without step history).
+fn shallow_scores_boards<E: Evaluator>(children: &[Board], eval: &E) -> Vec<f32> {
+    let mut scores = vec![0.0f32; children.len()];
+    let mut boards = Vec::with_capacity(children.len());
+    let mut slots = Vec::with_capacity(children.len());
+    for (i, c) in children.iter().enumerate() {
+        match result(c) {
+            GameResult::MoverWins(p) => scores[i] = p as f32,
+            _ => {
+                slots.push(i);
+                boards.push(c.swap_perspective());
+            }
+        }
+    }
+    let vals = eval.evaluate_batch(&boards);
+    for (k, &i) in slots.iter().enumerate() {
+        scores[i] = -vals[k].equity();
+    }
+    scores
+}
+
+/// `pick_playout` over resulting boards (see [`shallow_scores_boards`]).
+fn pick_playout_boards<E: Evaluator>(
+    b: &Board,
+    children: &[Board],
+    eval: &E,
+    net_race: bool,
+) -> usize {
+    if b.no_contact() && !net_race {
+        let mut best_i = 0;
+        let mut best = i32::MAX;
+        for (i, c) in children.iter().enumerate() {
+            let pip = c.pip_count(crate::board::MOVER);
+            if pip < best {
+                best = pip;
+                best_i = i;
+            }
+        }
+        return best_i;
+    }
+    argmax(&shallow_scores_boards(children, eval))
+}
+
 /// One truncated playout from `board`, returning equity **from the perspective
 /// of `board`'s side to move**. Uses a 0-ply policy (greedy on `eval`).
 fn rollout_once<E: Evaluator>(
@@ -131,8 +175,9 @@ fn rollout_once<E: Evaluator>(
     net_race: bool,
     rng: &mut Rng,
 ) -> f32 {
-    let mut b = board.clone();
+    let mut b = *board;
     let mut plies = 0usize;
+    let mut children: Vec<Board> = Vec::new();
     loop {
         // Every ply swaps perspective, so even plies are `board`'s mover.
         let sign = if plies.is_multiple_of(2) { 1.0 } else { -1.0 };
@@ -145,12 +190,12 @@ fn rollout_once<E: Evaluator>(
             return sign * eval.evaluate(&b).equity();
         }
 
-        let moves = genmoves(&b, &rng.roll());
-        let chosen = &moves[pick_playout(&b, &moves, eval, net_race)];
-        if let GameResult::MoverWins(p) = result(&chosen.result) {
+        genmoves_playout(&b, &rng.roll(), &mut children);
+        let chosen = children[pick_playout_boards(&b, &children, eval, net_race)];
+        if let GameResult::MoverWins(p) = result(&chosen) {
             return sign * p as f32; // the side that just moved won
         }
-        b = chosen.result.swap_perspective();
+        b = chosen.swap_perspective();
         plies += 1;
     }
 }
@@ -278,8 +323,9 @@ fn rollout_once_dist<E: Evaluator>(
     net_race: bool,
     rng: &mut Rng,
 ) -> [f32; 5] {
-    let mut b = board.clone();
+    let mut b = *board;
     let mut plies = 0usize;
+    let mut children: Vec<Board> = Vec::new();
     loop {
         match result(&b) {
             GameResult::MoverWins(p) => return orient(win_vec(p), plies),
@@ -290,12 +336,12 @@ fn rollout_once_dist<E: Evaluator>(
             let v = eval.evaluate(&b);
             return orient([v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg], plies);
         }
-        let moves = genmoves(&b, &rng.roll());
-        let chosen = &moves[pick_playout(&b, &moves, eval, net_race)];
-        if let GameResult::MoverWins(p) = result(&chosen.result) {
+        genmoves_playout(&b, &rng.roll(), &mut children);
+        let chosen = children[pick_playout_boards(&b, &children, eval, net_race)];
+        if let GameResult::MoverWins(p) = result(&chosen) {
             return orient(win_vec(p), plies);
         }
-        b = chosen.result.swap_perspective();
+        b = chosen.swap_perspective();
         plies += 1;
     }
 }
@@ -345,6 +391,242 @@ pub fn rollout_dist<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutC
         })
         .reduce(|| [0.0; 5], add5);
     mean(sums, cfg.trials as f32)
+}
+
+// --- Batched "wave" rollouts: label MANY positions in one pass -------------
+//
+// `rollout_dist` above rolls out ONE position; each ply scores that position's
+// ~18 legal children in a tiny `[~18, 198]` matmul. Small matmuls badly
+// underutilise the hardware. The wave engine instead keeps every `(board,
+// trial)` playout of MANY source positions in lockstep and, per ply-step,
+// gathers *all* playouts' pending net queries (move-selection children +
+// truncation leaves) into ONE huge batched forward pass. Same playouts, same
+// dice, same policy — just the net evals coalesced. Per-board output is
+// identical to calling `rollout_dist` on each board (within f32 tolerance:
+// tract's matmul may reduce a 198-dot in a different SIMD order at a different
+// batch size, which can rarely flip an ultra-close argmax).
+
+#[derive(Clone, Copy, PartialEq)]
+enum StepKind {
+    /// Finished, or nothing to do this step.
+    Idle,
+    /// Needs a truncation-leaf eval of the current board.
+    Leaf,
+    /// Needs the net to score this ply's (contact) children before advancing.
+    Move,
+}
+
+/// A single `(board, trial)` playout kept in flight by the wave engine.
+struct WavePlayout {
+    b: Board,
+    plies: usize,
+    rng: Rng,
+    /// Index of the source board this trial belongs to (within the wave chunk).
+    board_idx: usize,
+    /// Set once the playout terminates or truncates: its outcome 5-vector,
+    /// oriented to the source board's mover.
+    done: Option<[f32; 5]>,
+    /// What this playout needs from the batched eval this step.
+    kind: StepKind,
+    /// Transient: this ply's legal resulting boards (only for `StepKind::Move`).
+    moves: Vec<Board>,
+    /// Transient: offset of this playout's rows in the wave's batch this step.
+    batch_start: usize,
+}
+
+/// Batched Monte-Carlo rollouts for MANY positions at once. Produces the same
+/// per-board outcome distribution `[win, win_g, win_bg, lose_g, lose_bg]` as
+/// calling [`rollout_dist`] on each board.
+///
+/// The parallelism axis matters. tract's matmul is single-threaded, so the win
+/// is *per-thread batching*, not one giant matmul: coalescing a whole wave into
+/// a single huge matmul would serialise the hot path onto one core and lose the
+/// core-level parallelism the per-position rollout already gets for free. So we
+/// parallelise **across** `wave_boards`-sized chunks (one core each) and, within
+/// a chunk, run its `(board, trial)` playouts in lockstep — every ply's net
+/// evals coalesce into one batch that sits right in tract's batched sweet spot.
+/// With the default `trials`, `wave_boards = 1` already yields a ~2–3k-row batch
+/// per ply, so keep the chunk small: bigger chunks only cost memory and coarsen
+/// load balancing.
+pub fn rollout_dist_wave<E: Evaluator + Sync>(
+    boards: &[Board],
+    eval: &E,
+    cfg: &RolloutConfig,
+    wave_boards: usize,
+) -> Vec<[f32; 5]> {
+    let chunk = if wave_boards == 0 { 1 } else { wave_boards };
+    let parts: Vec<Vec<[f32; 5]>> =
+        boards.par_chunks(chunk).map(|group| wave_chunk(group, eval, cfg)).collect();
+    parts.concat()
+}
+
+/// One wave: roll out all trials of `boards` together to completion, on a single
+/// thread (the caller parallelises across waves). Every ply-step coalesces all
+/// live playouts' net queries into one batched forward pass.
+fn wave_chunk<E: Evaluator>(boards: &[Board], eval: &E, cfg: &RolloutConfig) -> Vec<[f32; 5]> {
+    let n = boards.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // trials == 0 degenerates to a static (batched) eval, matching rollout_dist.
+    if cfg.trials == 0 {
+        return eval
+            .evaluate_batch(boards)
+            .into_iter()
+            .map(|v| [v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg])
+            .collect();
+    }
+    let truncate = cfg.truncate_plies;
+    let net_race = cfg.net_race;
+
+    // One playout per (board, trial). Trial `t` uses the exact per-trial seed of
+    // rollout_dist, so each board's trial set reproduces its standalone rollout.
+    let mut playouts: Vec<WavePlayout> = Vec::with_capacity(n * cfg.trials);
+    for (bi, b) in boards.iter().enumerate() {
+        for t in 0..cfg.trials {
+            let rng = Rng::new(cfg.seed.wrapping_add(t as u64 + 1).wrapping_mul(GOLDEN));
+            playouts.push(WavePlayout {
+                b: b.clone(),
+                plies: 0,
+                rng,
+                board_idx: bi,
+                done: None,
+                kind: StepKind::Idle,
+                moves: Vec::new(),
+                batch_start: 0,
+            });
+        }
+    }
+
+    loop {
+        // Phase A (no net): advance every alive playout up to its next net query.
+        // Terminals resolve; pure-race plies play min-pip in place (no net), so a
+        // playout may cross several race plies here; contact plies stop with their
+        // moves stashed for the batch.
+        playouts.iter_mut().for_each(|p| {
+            if p.done.is_some() {
+                p.kind = StepKind::Idle;
+                return;
+            }
+            loop {
+                match result(&p.b) {
+                    GameResult::MoverWins(pt) => {
+                        p.done = Some(orient(win_vec(pt), p.plies));
+                        p.kind = StepKind::Idle;
+                        return;
+                    }
+                    GameResult::OppWins(pt) => {
+                        p.done = Some(orient(win_vec(pt), p.plies + 1));
+                        p.kind = StepKind::Idle;
+                        return;
+                    }
+                    GameResult::InProgress => {}
+                }
+                if truncate > 0 && p.plies >= truncate {
+                    p.kind = StepKind::Leaf;
+                    return;
+                }
+                let dice = p.rng.roll();
+                genmoves_playout(&p.b, &dice, &mut p.moves);
+                if p.b.no_contact() && !net_race {
+                    // Pure race: min-pip, no net. Advance in place and keep going.
+                    let mut best_i = 0usize;
+                    let mut best = i32::MAX;
+                    for (i, c) in p.moves.iter().enumerate() {
+                        let pip = c.pip_count(crate::board::MOVER);
+                        if pip < best {
+                            best = pip;
+                            best_i = i;
+                        }
+                    }
+                    let chosen = p.moves[best_i];
+                    if let GameResult::MoverWins(pt) = result(&chosen) {
+                        p.done = Some(orient(win_vec(pt), p.plies));
+                        p.kind = StepKind::Idle;
+                        return;
+                    }
+                    p.b = chosen.swap_perspective();
+                    p.plies += 1;
+                    continue;
+                }
+                // Contact: the net must score the children — defer to the batch.
+                // p.moves already holds this ply's resulting boards.
+                p.kind = StepKind::Move;
+                return;
+            }
+        });
+
+        // Phase B (gather): concatenate every pending net query into one batch.
+        // Leaf -> the playout's board; Move -> its non-terminal swapped children,
+        // in move order (mirrors shallow_scores). Sequential to fix batch order.
+        let mut batch: Vec<Board> = Vec::new();
+        for p in playouts.iter_mut() {
+            match p.kind {
+                StepKind::Leaf => {
+                    p.batch_start = batch.len();
+                    batch.push(p.b.clone());
+                }
+                StepKind::Move => {
+                    p.batch_start = batch.len();
+                    for c in &p.moves {
+                        if !matches!(result(c), GameResult::MoverWins(_)) {
+                            batch.push(c.swap_perspective());
+                        }
+                    }
+                }
+                StepKind::Idle => {}
+            }
+        }
+        if batch.is_empty() {
+            break; // every playout has finished
+        }
+
+        // Phase C: the whole point — ONE batched forward pass for the ply.
+        let vals = eval.evaluate_batch(&batch);
+
+        // Phase D (scatter): fold leaves; for contact plies rebuild
+        // shallow_scores from the batched vals, argmax, and advance (or finish).
+        playouts.iter_mut().for_each(|p| match p.kind {
+            StepKind::Leaf => {
+                let v = vals[p.batch_start];
+                p.done = Some(orient([v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg], p.plies));
+            }
+            StepKind::Move => {
+                let mut scores = vec![0.0f32; p.moves.len()];
+                let mut k = p.batch_start;
+                for (i, c) in p.moves.iter().enumerate() {
+                    match result(c) {
+                        GameResult::MoverWins(pt) => scores[i] = pt as f32,
+                        _ => {
+                            scores[i] = -vals[k].equity();
+                            k += 1;
+                        }
+                    }
+                }
+                let idx = argmax(&scores);
+                let chosen = p.moves[idx];
+                if let GameResult::MoverWins(pt) = result(&chosen) {
+                    p.done = Some(orient(win_vec(pt), p.plies));
+                } else {
+                    p.b = chosen.swap_perspective();
+                    p.plies += 1;
+                }
+                p.moves.clear();
+            }
+            StepKind::Idle => {}
+        });
+    }
+
+    // Aggregate: mean over each source board's trials.
+    let mut sums = vec![[0.0f32; 5]; n];
+    for p in &playouts {
+        let d = p.done.expect("every playout finishes");
+        sums[p.board_idx] = add5(sums[p.board_idx], d);
+    }
+    let inv = 1.0 / cfg.trials as f32;
+    sums.into_iter()
+        .map(|s| [s[0] * inv, s[1] * inv, s[2] * inv, s[3] * inv, s[4] * inv])
+        .collect()
 }
 
 /// An [`Engine`] that picks its move by rolling out the top candidates and
@@ -458,6 +740,56 @@ mod tests {
         let a = rollout_equity(&b, &HceEval::new(), &cfg);
         let c = rollout_equity(&b, &HceEval::new(), &cfg);
         assert_eq!(a, c, "same seed must give the same estimate");
+    }
+
+    #[test]
+    fn wave_matches_per_trial_rollout_dist() {
+        // The batched wave engine must reproduce, per board, the same outcome
+        // distribution as calling rollout_dist on each board. With HceEval the
+        // batched and single-position evals are bit-identical (no matmul), so any
+        // gap here is a logic bug, not float reordering. (The tiny residual is
+        // just the order the 180 per-trial vectors are summed in.)
+        let cfg = RolloutConfig { trials: 96, truncate_plies: 7, candidates: 0, seed: 11, ..Default::default() };
+        let eval = HceEval::new();
+
+        // A spread of positions: opening, a mid-game contact position, and a race.
+        let opening = Board::starting_position();
+        let mut contact = Board::empty();
+        contact.set_point(6, 4);
+        contact.set_point(8, 3);
+        contact.set_point(13, 5);
+        contact.set_point(24, 2);
+        contact.set_point(1, -3);
+        contact.set_point(12, -5);
+        contact.set_point(19, -4);
+        contact.set_point(17, -3);
+        let mut race = Board::empty();
+        race.set_off(MOVER, 3);
+        race.set_point(1, 4);
+        race.set_point(2, 4);
+        race.set_point(3, 4);
+        race.set_point(22, -4);
+        race.set_point(23, -4);
+        race.set_point(24, -4);
+        assert!(race.no_contact());
+        let boards = vec![opening, contact, race];
+
+        let per_trial: Vec<[f32; 5]> =
+            boards.iter().map(|b| rollout_dist(b, &eval, &cfg)).collect();
+        // wave_boards = 0 (all in one wave) and a small chunk must both match.
+        for wb in [0usize, 2] {
+            let wave = rollout_dist_wave(&boards, &eval, &cfg, wb);
+            let mut max_diff = 0.0f32;
+            for (w, s) in wave.iter().zip(&per_trial) {
+                for k in 0..5 {
+                    max_diff = max_diff.max((w[k] - s[k]).abs());
+                }
+            }
+            assert!(
+                max_diff < 1e-4,
+                "wave (wave_boards={wb}) diverged from per-trial rollout_dist by {max_diff}"
+            );
+        }
     }
 
     #[test]

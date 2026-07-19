@@ -379,6 +379,20 @@ fn ro_dist<E: bgengine::Evaluator + Sync>(
 }
 
 #[cfg(feature = "onnx")]
+fn ro_dist_batch<E: bgengine::Evaluator + Sync>(
+    e: &E,
+    boards: &[Board],
+    cfg: &bgengine::RolloutConfig,
+    wave_boards: usize,
+    pool: &Option<rayon::ThreadPool>,
+) -> Vec<[f32; 5]> {
+    match pool {
+        Some(p) => p.install(|| bgengine::rollout_dist_wave(boards, e, cfg, wave_boards)),
+        None => bgengine::rollout_dist_wave(boards, e, cfg, wave_boards),
+    }
+}
+
+#[cfg(feature = "onnx")]
 fn ro_best<E: bgengine::Evaluator + Sync>(
     e: &E,
     b: &Board,
@@ -472,6 +486,26 @@ impl Rollouts {
             RollEval::Phase(pe) => ro_dist(pe, &board.inner, &self.cfg, &self.pool),
         })
         .to_vec()
+    }
+
+    /// Batched rollout labels for MANY positions in ONE pass — the fast labeling
+    /// path. Returns one `[win, win_g, win_bg, lose_g, lose_bg]` per input board,
+    /// identical (within f32 tolerance) to calling [`Rollouts::dist`] on each, but
+    /// keeps every `(board, trial)` playout in lockstep so each ply's net evals
+    /// coalesce into one big matmul. `wave_boards` source boards are rolled out
+    /// together (throughput/memory knob; `0` = all at once — use a few dozen to
+    /// stay in the batched-matmul sweet spot without ballooning memory).
+    /// Releases the GIL.
+    #[pyo3(signature = (boards, wave_boards = 64))]
+    fn dist_batch(&self, py: Python<'_>, boards: Vec<PyBoard>, wave_boards: usize) -> Vec<Vec<f32>> {
+        let inner: Vec<Board> = boards.into_iter().map(|b| b.inner).collect();
+        py.allow_threads(|| {
+            let dists = match &self.eval {
+                RollEval::Single(nn) => ro_dist_batch(nn, &inner, &self.cfg, wave_boards, &self.pool),
+                RollEval::Phase(pe) => ro_dist_batch(pe, &inner, &self.cfg, wave_boards, &self.pool),
+            };
+            dists.into_iter().map(|d| d.to_vec()).collect()
+        })
     }
 
     /// The rollout engine's move for dice `d1, d2` as `(result_board, equity)`,

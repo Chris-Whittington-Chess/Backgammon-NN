@@ -35,7 +35,7 @@ const CRASHED_BASE: usize = RACE_EDGES.len() + 1; // 3
 const CONTACT_BASE: usize = CRASHED_BASE + CRASHED_EDGES.len() + 1; // 5
 
 /// A backgammon position, stored from the side-to-move's perspective.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Board {
     /// `points[1..=24]`; `points[0]` unused. `+` = mover, `-` = opponent.
     points: [i8; NUM_POINTS + 1],
