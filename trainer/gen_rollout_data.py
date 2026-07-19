@@ -71,11 +71,11 @@ def generate(net_file, n_positions, trials, truncate, eps, seed, out, save_every
     ro = bgcore.Rollouts(str(MODELS / net_file), trials, truncate, 0, 0x5EED, 0, 0)
 
     pos_ids, probs, outcomes, buckets = [], [], [], []
-    # Positions awaiting a rollout label. Sampling a game is cheap; the rollout is
-    # ~100x costlier, so we accumulate boards across games and label them in ONE
-    # batched wave pass (ro.dist_batch) — keeps every playout's net evals coalesced
-    # into big matmuls and every core busy. dist_batch is bit-identical (f32) to
-    # calling ro.dist per board, so the stored labels are unchanged.
+    # Positions awaiting a rollout label, flushed in save-sized batches. Each label
+    # is a per-position ro.dist call (which already parallelises its trials across
+    # all cores). Post fast-move-gen this beats the batched wave path ro.dist_batch
+    # (~1.8x at truncate 0), because rollouts are no longer move-gen-bound and the
+    # wave engine's per-chunk batching now costs more than it saves.
     pend_b, pend_id, pend_o, pend_bk = [], [], [], []
     t0 = time.time()
     last_save = [0]
@@ -83,7 +83,7 @@ def generate(net_file, n_positions, trials, truncate, eps, seed, out, save_every
     def flush():
         if not pend_b:
             return
-        for pid, d5, o, bk in zip(pend_id, ro.dist_batch(pend_b, wave_boards),
+        for pid, d5, o, bk in zip(pend_id, (ro.dist(b) for b in pend_b),
                                   pend_o, pend_bk):
             pos_ids.append(pid)
             probs.append(dist6_from5(d5))
