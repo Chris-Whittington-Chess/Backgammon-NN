@@ -83,6 +83,11 @@ def main():
     t0 = time.time()
     decisions = sample_decisions(net, args.decisions, args.eps, rng)
 
+    def phase_of(b):
+        if b.no_contact():
+            return "race"
+        return "crashed" if b.crashed() else "contact"
+
     # Our chosen move per decision + collect every non-terminal child's id.
     all_ids, recs = [], []
     for (b, d1, d2) in decisions:
@@ -97,18 +102,20 @@ def main():
                 oure.append(-net.equity(s))
                 slots.append(len(all_ids)); all_ids.append(s.position_id())
         our_choice = max(range(len(kids)), key=lambda j: oure[j])
-        recs.append((slots, our_choice, term))
+        recs.append((slots, our_choice, term, phase_of(b)))
 
     print(f"evaluating {len(all_ids)} child positions through gnubg 0-ply...", flush=True)
     gnu = gnubg_static_equities(all_ids)   # opponent equity per non-terminal child
 
-    errors, agree = [], 0
-    for (slots, our_choice, term) in recs:
+    errors, agree, phases = [], 0, []
+    for (slots, our_choice, term, ph) in recs:
         gmov = [float(term[j]) if sl is None else -gnu[sl] for j, sl in enumerate(slots)]
         best = max(range(len(gmov)), key=lambda j: gmov[j])
         errors.append(gmov[best] - gmov[our_choice])
         agree += (best == our_choice)
+        phases.append(ph)
     errors = np.array(errors)
+    phases = np.array(phases)
     n = len(errors)
 
     print(f"\n=== gnubg 0-ply benchmark | net {args.net} | {n} decisions "
@@ -116,8 +123,15 @@ def main():
     print(f"  move agreement (we pick gnubg's top move) : {100*agree/n:5.1f}%")
     print(f"  mean equity error / move                  : {errors.mean()*1000:6.1f} millipoints")
     print(f"  median equity error / move                : {np.median(errors)*1000:6.1f} millipoints")
-    print(f"  decisions within 5 mEMG of gnubg's best    : {100*(errors < 0.005).mean():5.1f}%")
+    print(f"  decisions within 5 mp of gnubg's best      : {100*(errors < 0.005).mean():5.1f}%")
     print(f"  worst single decision                     : {errors.max()*1000:6.1f} millipoints")
+    print(f"\n  by phase        decisions    agree    mean error")
+    for ph in ("contact", "crashed", "race"):
+        mask = phases == ph
+        if mask.sum():
+            e = errors[mask]
+            ag = 100 * np.mean(e == 0)  # error 0 => we picked gnubg's best move
+            print(f"  {ph:8s}         {mask.sum():6d}     {ag:5.1f}%     {e.mean()*1000:6.1f} mp")
 
 
 if __name__ == "__main__":
