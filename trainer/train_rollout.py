@@ -41,9 +41,11 @@ MODELS = Path(__file__).resolve().parent.parent / "models"
 CLASS_OF = {1: 0, 2: 1, 3: 2, -1: 3, -2: 4, -3: 5}
 
 
-def load_dataset(path):
+def load_dataset(path, limit=0, limit_seed=0):
     """`path` may be a comma-separated list of .npz files, concatenated (e.g. the
-    2M and the earlier 400K rollout sets — same champion leaf, mix noise fine)."""
+    2M and the earlier 400K rollout sets — same champion leaf, mix noise fine).
+    `limit` > 0 keeps a random subset of that many positions (for data-scaling
+    tests); subsampled BEFORE re-encoding so only the kept positions are encoded."""
     ids, softs, outs, bks = [], [], [], []
     for p in path.split(","):
         d = np.load(MODELS / p.strip())
@@ -53,6 +55,9 @@ def load_dataset(path):
     soft = np.concatenate(softs)
     outcomes = np.concatenate(outs)
     buckets = np.concatenate(bks)
+    if limit and limit < len(pos_ids):
+        sel = np.random.default_rng(limit_seed).choice(len(pos_ids), size=limit, replace=False)
+        pos_ids, soft, outcomes, buckets = pos_ids[sel], soft[sel], outcomes[sel], buckets[sel]
     feats = np.stack([bgcore.Board.from_id(str(p)).features() for p in pos_ids]).astype(np.float32)
     hard = np.array([CLASS_OF[int(o)] for o in outcomes], dtype=np.int64)
     return feats, soft, hard, buckets
@@ -61,6 +66,8 @@ def load_dataset(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="rollout_data.npz")
+    ap.add_argument("--limit", type=int, default=0, help="train on a random N-position subset (data-scaling test)")
+    ap.add_argument("--limit-seed", type=int, default=0)
     ap.add_argument("--alpha", type=float, default=0.75, help="soft-label weight")
     ap.add_argument("--hidden", default="256,128")
     ap.add_argument("--act", choices=["relu", "sqrelu"], default="relu")
@@ -83,7 +90,7 @@ def main():
     sizes = [int(x) for x in args.hidden.split(",") if x.strip()]
     hidden = sizes[0] if len(sizes) == 1 else sizes
 
-    feats, soft, hard, buckets = load_dataset(args.data)
+    feats, soft, hard, buckets = load_dataset(args.data, args.limit, args.limit_seed)
     n = len(feats)
     onehot = np.zeros((n, 6), dtype=np.float32)
     onehot[np.arange(n), hard] = 1.0

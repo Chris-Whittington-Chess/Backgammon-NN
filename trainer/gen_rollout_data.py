@@ -64,15 +64,42 @@ def _save(out, pos_ids, probs, outcomes, buckets, trials, truncate, net):
         trials=trials, truncate=truncate, net=net)
 
 
-def generate(net_file, n_positions, trials, truncate, eps, seed, out, save_every):
+def generate(net_file, n_positions, trials, truncate, eps, seed, out, save_every,
+             wave_batch, wave_boards):
     rng = random.Random(seed)
     pol = bgcore.Neural(str(MODELS / net_file), 0, 0)
     ro = bgcore.Rollouts(str(MODELS / net_file), trials, truncate, 0, 0x5EED, 0, 0)
 
     pos_ids, probs, outcomes, buckets = [], [], [], []
+    # Positions awaiting a rollout label. Sampling a game is cheap; the rollout is
+    # ~100x costlier, so we accumulate boards across games and label them in ONE
+    # batched wave pass (ro.dist_batch) — keeps every playout's net evals coalesced
+    # into big matmuls and every core busy. dist_batch is bit-identical (f32) to
+    # calling ro.dist per board, so the stored labels are unchanged.
+    pend_b, pend_id, pend_o, pend_bk = [], [], [], []
     t0 = time.time()
-    last_save = 0
-    while len(pos_ids) < n_positions:
+    last_save = [0]
+
+    def flush():
+        if not pend_b:
+            return
+        for pid, d5, o, bk in zip(pend_id, ro.dist_batch(pend_b, wave_boards),
+                                  pend_o, pend_bk):
+            pos_ids.append(pid)
+            probs.append(dist6_from5(d5))
+            outcomes.append(o)
+            buckets.append(bk)
+        pend_b.clear(); pend_id.clear(); pend_o.clear(); pend_bk.clear()
+        # Periodic progress + incremental checkpoint (a crash keeps most of the run).
+        if len(pos_ids) - last_save[0] >= save_every:
+            last_save[0] = len(pos_ids)
+            _save(out, pos_ids, probs, outcomes, buckets, trials, truncate, net_file)
+            rate = len(pos_ids) / max(time.time() - t0, 1e-9)
+            eta_h = (n_positions - len(pos_ids)) / max(rate, 1e-9) / 3600
+            print(f"  {len(pos_ids):7d}/{n_positions} | {rate:6.1f} pos/sec | "
+                  f"ETA {eta_h:4.1f}h | saved", flush=True)
+
+    while len(pos_ids) + len(pend_b) < n_positions:
         boards, b = [], bgcore.Board.starting()
         result = None
         for _ in range(4000):
@@ -85,25 +112,20 @@ def generate(net_file, n_positions, trials, truncate, eps, seed, out, save_every
             b = nb
         if result is None:
             continue
-        # Label every decision position of this game.
+        # Queue every decision position of this game for the next batched rollout.
         for i, bd in enumerate(boards):
             plies_from_end = len(boards) - 1 - i
             signed = result if plies_from_end % 2 == 0 else -result
-            pos_ids.append(bd.position_id())
-            probs.append(dist6_from5(ro.dist(bd)))
-            outcomes.append(signed)
-            buckets.append(bd.route_bucket())
-            if len(pos_ids) >= n_positions:
+            pend_b.append(bd)
+            pend_id.append(bd.position_id())
+            pend_o.append(signed)
+            pend_bk.append(bd.route_bucket())
+            if len(pos_ids) + len(pend_b) >= n_positions:
                 break
-        # Periodic progress + incremental checkpoint (a crash keeps most of the run).
-        if len(pos_ids) - last_save >= save_every:
-            last_save = len(pos_ids)
-            _save(out, pos_ids, probs, outcomes, buckets, trials, truncate, net_file)
-            rate = len(pos_ids) / max(time.time() - t0, 1e-9)
-            eta_h = (n_positions - len(pos_ids)) / max(rate, 1e-9) / 3600
-            print(f"  {len(pos_ids):7d}/{n_positions} | {rate:6.1f} pos/sec | "
-                  f"ETA {eta_h:4.1f}h | saved", flush=True)
+        if len(pend_b) >= wave_batch:
+            flush()
 
+    flush()
     _save(out, pos_ids, probs, outcomes, buckets, trials, truncate, net_file)
     return (np.array(pos_ids), np.asarray(probs, dtype=np.float32),
             np.asarray(outcomes, dtype=np.int8), np.asarray(buckets, dtype=np.int8))
@@ -119,15 +141,22 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save-every", type=int, default=20000,
                     help="incrementally checkpoint the .npz every N positions")
+    ap.add_argument("--wave-batch", type=int, default=2048,
+                    help="accumulate this many positions, then label them in one "
+                         "batched wave pass (bigger = fuller batches, more RAM)")
+    ap.add_argument("--wave-boards", type=int, default=64,
+                    help="wave chunk size (boards per core per wave); small keeps "
+                         "the cores load-balanced — each board already batches its trials")
     ap.add_argument("--out", default="rollout_data.npz")
     args = ap.parse_args()
 
     out = MODELS / args.out
     print(f"Labeling {args.positions} positions with {args.net} rollouts "
-          f"(trials={args.trials}, truncate={args.truncate}, eps={args.eps}) -> {args.out}")
+          f"(trials={args.trials}, truncate={args.truncate}, eps={args.eps}, "
+          f"wave_batch={args.wave_batch}, wave_boards={args.wave_boards}) -> {args.out}")
     pos_ids, probs, outcomes, buckets = generate(
         args.net, args.positions, args.trials, args.truncate, args.eps, args.seed,
-        out, args.save_every)
+        out, args.save_every, args.wave_batch, args.wave_boards)
 
     # Sanity summary.
     pop = np.bincount(buckets.astype(int), minlength=12)
