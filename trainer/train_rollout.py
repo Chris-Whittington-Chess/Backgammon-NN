@@ -42,11 +42,17 @@ CLASS_OF = {1: 0, 2: 1, 3: 2, -1: 3, -2: 4, -3: 5}
 
 
 def load_dataset(path):
-    d = np.load(MODELS / path)
-    pos_ids = d["pos_ids"]
-    soft = d["probs"].astype(np.float32)
-    outcomes = d["outcomes"].astype(int)
-    buckets = d["buckets"].astype(np.int64)
+    """`path` may be a comma-separated list of .npz files, concatenated (e.g. the
+    2M and the earlier 400K rollout sets — same champion leaf, mix noise fine)."""
+    ids, softs, outs, bks = [], [], [], []
+    for p in path.split(","):
+        d = np.load(MODELS / p.strip())
+        ids.append(d["pos_ids"]); softs.append(d["probs"].astype(np.float32))
+        outs.append(d["outcomes"].astype(int)); bks.append(d["buckets"].astype(np.int64))
+    pos_ids = np.concatenate(ids)
+    soft = np.concatenate(softs)
+    outcomes = np.concatenate(outs)
+    buckets = np.concatenate(bks)
     feats = np.stack([bgcore.Board.from_id(str(p)).features() for p in pos_ids]).astype(np.float32)
     hard = np.array([CLASS_OF[int(o)] for o in outcomes], dtype=np.int64)
     return feats, soft, hard, buckets
@@ -151,7 +157,13 @@ def main():
                 line += "  <- best (saved)"
         print(line, flush=True)
 
+    # Also save the FINAL (fully-annealed) net, to compare against keep-best.
+    final = MODELS / (Path(args.out).stem + "_final.pt")
+    torch.save({"model": net.state_dict(), "hidden": hidden, "act": args.act,
+                "bucketed": True, "n_buckets": N_HEADS, "class_aware": True,
+                "alpha": args.alpha, "epoch": args.epochs, "iter": args.epochs}, final)
     print(f"\nbest at epoch {best_ep} (metric {best_metric:.3f}) -> {MODELS / args.out}")
+    print(f"final net (epoch {args.epochs}) -> {final}")
 
 
 if __name__ == "__main__":

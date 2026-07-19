@@ -20,6 +20,8 @@ Everything below is about making that net *stronger*.
 | 6 | Class-aware routing (race/crashed/contact, 12 heads) | ◐ Routing neutral; **LR-decay recipe** drove the gain | **v1.8.0** |
 | 7 | Richer input features (14 strategic, 198→212) | ❌ **Failed** — features aren't the lever | no |
 | 8 | Rollout-labeled supervised training | ◐ **Parity** — matches champion with ~375× less data | no |
+| 9 | Absolute benchmark vs gnubg (0-ply) | 📊 Champion **~43%** — first world-class placement | tool |
+| 10 | Rollout-label **bootstrapping loop** | ◐ **Gaining** — round 1: 43% → **45.5%** vs gnubg | in progress |
 
 ---
 
@@ -107,10 +109,39 @@ own truncated rollouts, then supervised-trained the class-aware net to a **soft/
   though, because the labels use the champion as their rollout leaf. Exceeding it needs
   **stronger labels** (untruncated / 2-ply-leaf rollouts) — the honest next lever.
 
-**Net verdict across 6–8:** routing (neutral), features (negative), rollout labels (parity)
-— none beats v1.8.0. The net is near a ceiling for this size/feature/regime; the real
-remaining strength is *structural* — an **exact bear-off database** and an absolute
-**gnubg benchmark** to locate the true headroom.
+**Single-round verdict across 6–8:** routing (neutral), features (negative), rollout labels
+(parity) — none *singly* beats v1.8.0. But two things followed that changed the picture: an
+absolute yardstick (§9), and *iterating* the rollout labels (§10), which does break past the
+champion.
+
+## 9. Absolute benchmark — vs gnubg at 0-ply — 📊 the real yardstick
+Everything above was measured against our *own* champion or wildbg. Installing **gnubg**
+(world-class) and bridging via the GNU Position ID gave the first *absolute* placement. A
+direct 0-ply head-to-head — our engine generates the moves, gnubg picks by evaluating each
+resulting position, parallelized across 32 gnubg processes — puts **our champion at ~43%
+(PPG −0.20)**: gnubg's 0-ply genuinely out-plays ours, but we're *competitive, not
+outclassed*. A phase breakdown locates the gap in **contact** (race/bear-off are near-even,
+and gnubg's exact bear-off database owns the endgame anyway). **This sets the target: +7
+points / +0.2 PPG at 0-ply.** (We first tried a millipoint *error-rate* metric but it was
+self-scoring-biased — gnubg can't lose measured against its own eval — so the head-to-head is
+the honest measure.)
+
+## 10. Rollout-label bootstrapping loop — ◐ gaining
+Experiment 8 capped at champion-level because its labels used the champion as their rollout
+leaf. The escape — **expert iteration**, exactly how gnubg itself was trained: *relabel each
+round with the improved net*, so the leaf strengthens and the label ceiling rises every round.
+- **Round 1:** labeled **2.4M** positions (2M fresh @180 trials + the earlier 400k, all
+  11-ply truncated), trained α=0.9. The extra data alone broke experiment-8's parity —
+  **beats the champion ~55% @0-ply** (vs 49.4% from 400k), capturing the full
+  rollout-over-0-ply gain the smaller set left on the table. Converged and epoch-independent
+  (epoch-10 and epoch-60 both ~45.5% vs gnubg).
+- **It moved the *absolute* needle:** **43% → 45.5% vs gnubg**, PPG gap roughly halved
+  (−0.20 → −0.12). Beating our own lineage *did* translate to gnubg progress — at a
+  diminishing per-round rate.
+- **Round 2 in progress** (relabel with the round-1 net). At ~+2.5 pts/round and declining,
+  a few rounds might reach 50% — or plateau short, at which point **distilling gnubg directly**
+  (learning from the stronger teacher we now have installed) earns its place. This loop is the
+  current front line.
 
 ---
 
@@ -124,7 +155,13 @@ remaining strength is *structural* — an **exact bear-off database** and an abs
 - **Share the body, specialize the head.** Output bucketing beat separate per-phase nets by
   avoiding data starvation.
 - **The ceiling is training signal, not the net.** Routing (neutral) and features (negative)
-  both flopped; both point to label quality — hence experiment 8.
+  both flopped; both point to label quality — hence experiments 8 and 10.
+- **The teacher sets the ceiling.** A distilled net can't exceed its teacher. Our own rollouts
+  — however deep — cap at our-net level (proven in §8); to go higher, *iterate* the loop
+  (raise the leaf each round, §10) or learn from a stronger teacher (gnubg).
+- **Measure absolutely, not just internally.** Beating our own champion ≠ closing the external
+  gap. The loop gains 55% vs our lineage but only +2.5 pts vs gnubg — the world-class
+  head-to-head (§9) is the honest yardstick.
 - **Bucket population must be calibrated** (even octiles), or heads starve.
 
 ## Shipped milestones
