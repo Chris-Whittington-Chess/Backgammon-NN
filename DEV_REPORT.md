@@ -21,7 +21,11 @@ Everything below is about making that net *stronger*.
 | 7 | Richer input features (14 strategic, 198→212) | ❌ **Failed** — features aren't the lever | no |
 | 8 | Rollout-labeled supervised training | ◐ **Parity** — matches champion with ~375× less data | no |
 | 9 | Absolute benchmark vs gnubg (0-ply) | 📊 Champion **~43%** — first world-class placement | tool |
-| 10 | Rollout-label **bootstrapping loop** | ◐ **Gaining** — round 1: 43% → **45.5%** vs gnubg | in progress |
+| 10 | Rollout-label **bootstrapping loop** | ◐ Round 1 gained: 43% → **45.5%** vs gnubg, then converged | no |
+| 11 | Loop past round 1 — data / quantity / α | ◐ **Fixed point** — round 2, 3.9M, α=1.0 all ~parity | no |
+| 12 | Untruncated (λ=1) rollout labels | ❌ **Worse** — the ceiling is champion *play*, not truncation | no |
+| 13 | Fast rollout engine (wave + step-free move-gen) | ✅ **Engine win** — ~5× labeling; per-position beats wave | infra |
+| 14 | n-ply **search distillation** (1-ply → 2-ply) | ◐ 1-ply parity; **2-ply pilot running** | in progress |
 
 ---
 
@@ -138,10 +142,57 @@ round with the improved net*, so the leaf strengthens and the label ceiling rise
 - **It moved the *absolute* needle:** **43% → 45.5% vs gnubg**, PPG gap roughly halved
   (−0.20 → −0.12). Beating our own lineage *did* translate to gnubg progress — at a
   diminishing per-round rate.
-- **Round 2 in progress** (relabel with the round-1 net). At ~+2.5 pts/round and declining,
-  a few rounds might reach 50% — or plateau short, at which point **distilling gnubg directly**
-  (learning from the stronger teacher we now have installed) earns its place. This loop is the
-  current front line.
+- **Round 1 was the peak.** The loop gained *once* then hit a fixed point (§11). The front
+  line is now label *quality* (§12–14), not more rounds.
+
+## 11. The loop's fixed point — data, quantity, and α all ruled out — ◐ parity
+Round 1's gain did not repeat. **Round 2** (relabel 1.54M with the round-1 net, α=0.9) landed
+at **45.6% vs gnubg (z −1.56)** — dead level with round 1. Suspecting a data-quantity confound
+(1.54M vs round-1's 2.4M), we retrained on the **combined 3.9M** pool: still ~parity vs
+champion. And **α=1.0** (drop the noisy game-outcome anchor entirely) on that same 3.9M: also
+~parity (49.4%). The mechanism is a genuine fixed point — the loop converges when *net static
+== its own 11-ply-rollout-bootstrapped-on-static target*; once round 1's net predicts that,
+using it as round 2's leaf reproduces the same target and the trainee has caught the teacher.
+**More data estimates the same fixed point more precisely; α only trims noise around it.
+Neither raises the ceiling — the truncation does.**
+
+## 12. Untruncated (λ=1) rollout labels — ❌ worse, not better
+If the truncation-leaf is the ceiling, roll to the *end*: unbiased Monte-Carlo, no leaf. We
+generated **1.37M** untruncated labels (the fast engine, §13, made this affordable) and
+trained — **~46.8% vs champion, *below* the truncated runs.** The theory was wrong, and
+informatively so: **the ceiling was never the truncation — it's the champion's *play*.**
+Rolling the weak 0-ply greedy policy ~50 plies to the game's end accumulates its blunders;
+truncating at ply 11 and trusting the champion's *static eval* gives a **better** value
+estimate (a trained value function beats 40 more plies of its own weak play — bias–variance
+favours truncation). This closes the entire "rollout under champion 0-ply play" family:
+data, α, truncation depth — every axis lands at champion parity (~45.5% vs gnubg).
+
+## 13. Fast rollout engine — ✅ engine win
+To afford the label experiments we rebuilt the rollout hot path. A **batched "wave" engine**
+(all playouts in lockstep, one big matmul per ply) gave 2.1× — but revealed the real
+bottleneck: rollouts are **move-generation-bound, not inference-bound** (throughput was flat
+across batch size, so a GPU is moot). The decisive win was a **step-free playout move
+generator** — no per-node `Vec<Step>`, a `Copy` 30-byte board, dice as a count-multiset
+instead of per-level heap allocation. Per-position labeling jumped to **~57 pos/sec**, enough
+that it now *beats* the wave engine: move-gen is no longer the bottleneck, so the simpler
+per-position path (trials parallel across cores) wins. Both paths are proven bit-identical to
+the reference by property tests.
+
+## 14. n-ply search distillation — the last search-based lever — ◐ in progress
+With rollouts exhausted, distil a *stronger* teacher: the champion's own **n-ply search
+value**. Cost analysis first — stronger *play inside* rollouts is infeasible (~0.04 pos/sec: a
+rollout label is ~1,000 move-decisions, and each n-ply decision is 250×+ costlier), but
+distilling the search *value* is **one search per label**. **1-ply distillation = parity**
+(~48% vs champion): a TD-trained net's static eval already approximates its own one-ply
+backup, so there is nothing to learn. **2-ply is the genuine test** — it corrects errors the
+static eval structurally *cannot* see (it can't evaluate a position it hasn't reached), which
+is exactly why gnubg searches. It needed a new **distribution-returning expectiminimax** that
+propagates the principal variation's win/gammon/backgammon split (not just equity, which the
+trainer can't use), proven to fold to the exact same equity as the scalar search. A 200K-
+position 2-ply pilot is generating now at ~11 pos/sec. *(PUCT/MCTS is the wrong tool here:
+chance nodes dilute simulations across 21 rolls per ply, dice reset the tree each turn, and
+the value net is too accurate for selective deep search to pay — which is why no strong
+backgammon engine uses MCTS. Expectiminimax + rollouts is the paradigm.)*
 
 ---
 
@@ -163,6 +214,15 @@ round with the improved net*, so the leaf strengthens and the label ceiling rise
   gap. The loop gains 55% vs our lineage but only +2.5 pts vs gnubg — the world-class
   head-to-head (§9) is the honest yardstick.
 - **Bucket population must be calibrated** (even octiles), or heads starve.
+- **The teacher's *policy* is the ceiling, not the label depth.** Deeper rollouts (λ=1)
+  *hurt* when the playout policy is weak — a good truncation-leaf eval beats extra plies of
+  weak play. Raise the ceiling by strengthening the *teacher* (search value), not the rollout.
+- **Price the search before believing the intuition.** Stronger-*play* rollouts sounded ideal
+  but cost ~1000× (rollouts are decision-dense); one-shot search-*value* distillation is the
+  affordable form of the same idea. Measure the cost of a label before committing a run.
+- **Optimise the actual bottleneck.** The wave engine chased the matmul; the real cost was
+  move generation. A micro-benchmark of the wrong stage (36× matmul) predicted a win that
+  didn't materialise — profile the whole path, not a slice.
 
 ## Shipped milestones
 - **v1.7.0** — pip-count output-bucketed net (experiment 5).
