@@ -99,6 +99,123 @@ fn pv<E: Evaluator>(board: &Board, depth: u8, eval: &E, candidates: usize) -> f3
     total
 }
 
+// --- Distribution-returning search --------------------------------------------
+//
+// `pv` folds each searched position to a scalar equity. For distillation labels we
+// need the full 5-outcome distribution [win, win_g, win_bg, lose_g, lose_bg] (mover
+// frame). `pvd` runs the SAME expectiminimax — average over the 21 rolls at chance
+// nodes, take the equity-best move at choice nodes — but carries that best move's
+// *distribution* instead of only its equity. By construction its folded equity
+// equals `position_value` exactly (verified by `position_dist_folds_to_pv`).
+
+fn win_vec5(points: u8) -> [f32; 5] {
+    [1.0, (points >= 2) as u8 as f32, (points >= 3) as u8 as f32, 0.0, 0.0]
+}
+
+/// Opponent-frame 5-vector -> mover frame (swap win/lose), matching `rollout::flip5`.
+fn flip5(v: [f32; 5]) -> [f32; 5] {
+    [1.0 - v[0], v[3], v[4], v[1], v[2]]
+}
+
+/// Equity of a 5-outcome distribution — identical to `Value::equity`.
+fn equity5(v: [f32; 5]) -> f32 {
+    let lose = 1.0 - v[0];
+    (v[0] - lose) + (v[1] - v[3]) + (v[2] - v[4])
+}
+
+fn add5(a: [f32; 5], b: [f32; 5]) -> [f32; 5] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4]]
+}
+
+fn scale5(w: f32, v: [f32; 5]) -> [f32; 5] {
+    [w * v[0], w * v[1], w * v[2], w * v[3], w * v[4]]
+}
+
+/// The static leaf distribution of a single move's result, mover frame.
+fn leaf_dist<E: Evaluator>(m: &Move, eval: &E) -> [f32; 5] {
+    match result(&m.result) {
+        GameResult::MoverWins(p) => win_vec5(p),
+        _ => {
+            let v = eval.evaluate(&m.result.swap_perspective());
+            flip5([v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg])
+        }
+    }
+}
+
+/// Expectiminimax distribution for the side to move at `board`, searched `depth`
+/// half-moves deep, carrying the principal variation's outcome distribution. Folds
+/// to the same equity as [`position_value`]. `candidates` prunes deep nodes (as in
+/// `pv`); `0` = full width.
+pub fn position_dist<E: Evaluator>(
+    board: &Board,
+    depth: u8,
+    candidates: usize,
+    eval: &E,
+) -> [f32; 5] {
+    pvd(board, depth, eval, candidates)
+}
+
+fn pvd<E: Evaluator>(board: &Board, depth: u8, eval: &E, candidates: usize) -> [f32; 5] {
+    match result(board) {
+        GameResult::MoverWins(p) => return win_vec5(p),
+        GameResult::OppWins(p) => return flip5(win_vec5(p)),
+        GameResult::InProgress => {}
+    }
+    if depth == 0 {
+        let v = eval.evaluate(board);
+        return [v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg];
+    }
+
+    let mut acc = [0.0f32; 5];
+    for a in 1..=6u8 {
+        for c in a..=6u8 {
+            let weight = if a == c { 1.0 / 36.0 } else { 2.0 / 36.0 };
+            let mut moves = genmoves(board, &Dice::new(a, c));
+            let vals = shallow_all(&moves, eval);
+
+            // Last ply: static values are the searched values; propagate the
+            // static-best move's leaf distribution (first max, as `pv` folds).
+            if depth == 1 {
+                let mut bi = 0;
+                for i in 1..vals.len() {
+                    if vals[i] > vals[bi] {
+                        bi = i;
+                    }
+                }
+                acc = add5(acc, scale5(weight, leaf_dist(&moves[bi], eval)));
+                continue;
+            }
+
+            // Prune to the best `candidates` before the deep search (mirrors `pv`).
+            if candidates > 0 && moves.len() > candidates {
+                let mut idx: Vec<usize> = (0..moves.len()).collect();
+                idx.sort_by(|&i, &j| vals[j].partial_cmp(&vals[i]).unwrap());
+                idx.truncate(candidates);
+                idx.sort_unstable();
+                let keep: Vec<Move> = idx.iter().map(|&i| moves[i].clone()).collect();
+                moves = keep;
+            }
+
+            // Choose the move with the best deep equity; propagate its distribution.
+            let mut best_eq = f32::NEG_INFINITY;
+            let mut best_dist = [0.0f32; 5];
+            for m in &moves {
+                let d = match result(&m.result) {
+                    GameResult::MoverWins(p) => win_vec5(p),
+                    _ => flip5(pvd(&m.result.swap_perspective(), depth - 1, eval, candidates)),
+                };
+                let eq = equity5(d);
+                if eq > best_eq {
+                    best_eq = eq;
+                    best_dist = d;
+                }
+            }
+            acc = add5(acc, scale5(weight, best_dist));
+        }
+    }
+    acc
+}
+
 /// Equity of every legal move for `dice`, from the mover's perspective, in
 /// [`genmoves`] order — the ranked list a GUI needs (best move, hints, and the
 /// cost of the alternatives), not just the single pick [`SearchEngine::choose`]
@@ -293,6 +410,33 @@ mod tests {
                 let chosen = SearchEngine::new(&hce, depth, "t").choose(&b, &d);
                 assert_eq!(genmoves(&b, &d)[best].result, chosen.result, "{d1}{d2} depth {depth}");
             }
+        }
+    }
+
+    /// The distribution-returning search must fold to exactly the same equity as
+    /// the scalar `pv`/`position_value` — full width AND candidate-pruned, across
+    /// depths. HCE is deterministic so the match is exact (no float-reorder slack).
+    #[test]
+    fn position_dist_folds_to_pv() {
+        let hce = HceEval::new();
+        let mut race = Board::empty();
+        race.set_off(crate::board::MOVER, 3);
+        race.set_point(4, 6);
+        race.set_point(5, 6);
+        race.set_point(20, 6);
+        race.set_point(21, 6);
+        let boards = [Board::starting_position(), race];
+        for b in &boards {
+            for depth in [0u8, 1, 2] {
+                let d = position_dist(b, depth, 0, &hce);
+                let eq = equity5(d);
+                let pval = position_value(b, depth, &hce);
+                assert!((eq - pval).abs() < 1e-4, "full depth {depth}: {eq} vs {pval}");
+                assert!(eq.is_finite() && eq.abs() <= 3.0);
+            }
+            // Candidate-pruned 2-ply must also agree with the pruned `pv`.
+            let dp = position_dist(b, 2, 4, &hce);
+            assert!((equity5(dp) - pv(b, 2, &hce, 4)).abs() < 1e-4, "pruned 2-ply mismatch");
         }
     }
 }

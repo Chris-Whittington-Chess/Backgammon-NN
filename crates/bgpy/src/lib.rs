@@ -283,6 +283,18 @@ impl Neural {
         vec![v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg]
     }
 
+    /// The n-ply *search* value distribution `[win, win_g, win_bg, lose_g,
+    /// lose_bg]` for the side to move — expectiminimax at this evaluator's
+    /// `lookahead`/`candidates`, dice-averaged, carrying the principal variation's
+    /// outcome split. Folds to the same equity as an n-ply search. Releases the
+    /// GIL. The distillation-label path (`trainer/gen_distil_data.py`).
+    fn search_dist(&self, py: Python<'_>, board: &PyBoard) -> Vec<f32> {
+        py.allow_threads(|| {
+            bgengine::position_dist(&board.inner, self.lookahead, self.candidates, &self.nn)
+                .to_vec()
+        })
+    }
+
     /// Equity of each legal move for `d1, d2` from the mover's perspective,
     /// aligned index-for-index with [`legal_moves`]. Releases the GIL: a 2-ply
     /// search takes a fair fraction of a second and the GUI stays responsive.
