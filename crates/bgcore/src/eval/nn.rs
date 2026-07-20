@@ -130,6 +130,10 @@ impl NnEval {
 
 impl Evaluator for NnEval {
     fn evaluate(&self, board: &Board) -> Value {
+        // A home-vs-home race is solved exactly by the bear-off table.
+        if crate::bearoff::is_home_race(board) {
+            return crate::bearoff::table().value(board);
+        }
         self.fold(&self.run_batch(&features::encode(board), 1), board)
     }
 
@@ -137,14 +141,33 @@ impl Evaluator for NnEval {
         if boards.is_empty() {
             return Vec::new();
         }
-        let mut feats = Vec::with_capacity(boards.len() * features::NUM_INPUTS);
-        for b in boards {
-            feats.extend_from_slice(&features::encode(b));
-        }
-        let out = self.run_batch(&feats, boards.len());
-        out.chunks_exact(self.outputs)
-            .zip(boards)
-            .map(|(row, b)| self.fold(row, b))
+        // Home-race positions get the exact bear-off value; everything else goes
+        // through the net in one batched pass, then we reassemble in input order.
+        let net_boards: Vec<&Board> =
+            boards.iter().filter(|b| !crate::bearoff::is_home_race(b)).collect();
+        let net_vals: Vec<Value> = if net_boards.is_empty() {
+            Vec::new()
+        } else {
+            let mut feats = Vec::with_capacity(net_boards.len() * features::NUM_INPUTS);
+            for b in &net_boards {
+                feats.extend_from_slice(&features::encode(b));
+            }
+            let out = self.run_batch(&feats, net_boards.len());
+            out.chunks_exact(self.outputs)
+                .zip(&net_boards)
+                .map(|(row, b)| self.fold(row, b))
+                .collect()
+        };
+        let mut net_it = net_vals.into_iter();
+        boards
+            .iter()
+            .map(|b| {
+                if crate::bearoff::is_home_race(b) {
+                    crate::bearoff::table().value(b)
+                } else {
+                    net_it.next().unwrap()
+                }
+            })
             .collect()
     }
 }

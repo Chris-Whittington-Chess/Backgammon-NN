@@ -13,6 +13,7 @@
 //!
 //! Milestone M0: `board` + `dice` + invariants.
 
+pub mod bearoff;
 pub mod board;
 pub mod dice;
 pub mod eval;
