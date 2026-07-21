@@ -25,7 +25,9 @@ Everything below is about making that net *stronger*.
 | 11 | Loop past round 1 — data / quantity / α | ◐ **Fixed point** — round 2, 3.9M, α=1.0 all ~parity | no |
 | 12 | Untruncated (λ=1) rollout labels | ❌ **Worse** — the ceiling is champion *play*, not truncation | no |
 | 13 | Fast rollout engine (wave + step-free move-gen) | ✅ **Engine win** — ~5× labeling; per-position beats wave | infra |
-| 14 | n-ply **search distillation** (1-ply → 2-ply) | ◐ 1-ply parity; **2-ply pilot running** | in progress |
+| 14 | n-ply **search distillation** (1-ply → 2-ply) | ✅ **Best net** — 2-ply beats 1-ply; ~52% vs champ at 1-ply, search-robust | **v1.9.0** |
+| 15 | Strategic features on **clean** labels (198→212) | ❌ **Failed again** — raw & split both ~parity; features aren't the lever | no |
+| 16 | Exact **bear-off EGTB** + wire into eval | ◐ Exact endgame, but **0-ply-neutral** (never flips a 0-ply move) | infra |
 
 ---
 
@@ -178,21 +180,46 @@ that it now *beats* the wave engine: move-gen is no longer the bottleneck, so th
 per-position path (trials parallel across cores) wins. Both paths are proven bit-identical to
 the reference by property tests.
 
-## 14. n-ply search distillation — the last search-based lever — ◐ in progress
+## 14. n-ply search distillation — ✅ the win (v1.9.0)
 With rollouts exhausted, distil a *stronger* teacher: the champion's own **n-ply search
-value**. Cost analysis first — stronger *play inside* rollouts is infeasible (~0.04 pos/sec: a
-rollout label is ~1,000 move-decisions, and each n-ply decision is 250×+ costlier), but
-distilling the search *value* is **one search per label**. **1-ply distillation = parity**
-(~48% vs champion): a TD-trained net's static eval already approximates its own one-ply
-backup, so there is nothing to learn. **2-ply is the genuine test** — it corrects errors the
-static eval structurally *cannot* see (it can't evaluate a position it hasn't reached), which
-is exactly why gnubg searches. It needed a new **distribution-returning expectiminimax** that
-propagates the principal variation's win/gammon/backgammon split (not just equity, which the
-trainer can't use), proven to fold to the exact same equity as the scalar search. A 200K-
-position 2-ply pilot is generating now at ~11 pos/sec. *(PUCT/MCTS is the wrong tool here:
-chance nodes dilute simulations across 21 rolls per ply, dice reset the tree each turn, and
-the value net is too accurate for selective deep search to pay — which is why no strong
-backgammon engine uses MCTS. Expectiminimax + rollouts is the paradigm.)*
+value**. Cost first — stronger *play inside* rollouts is infeasible (~0.04 pos/sec: a rollout
+label is ~1,000 move-decisions, each n-ply decision 250×+ costlier), but distilling the search
+*value* is **one search per label**. It needed a new **distribution-returning expectiminimax**
+that propagates the principal variation's win/gammon/backgammon split (not just equity, which
+the trainer can't use), proven to fold to the exact same equity as the scalar search.
+- **1-ply distillation = parity** (~48% vs champion): a TD net's static eval already
+  approximates its own one-ply backup, so there's nothing to learn.
+- **2-ply distillation is the lever.** At *equal* data the 2-ply pilot beat 1-ply (~45% vs
+  ~42.7% mean vs champion); the full **1.37M-label** net (`td_2ply_full`) is the strongest of
+  the session: ~50% vs champion at 0-ply, and — crucially — **~52% vs the champion at 1-ply
+  (1000 games, PPG +0.058)**. Small (~2%, not significant) but **search-robust**: the first
+  improvement all project that does *not* wash out under search (§ cross-cutting). Promoted as
+  **v1.9.0**.
+
+*(PUCT/MCTS is the wrong tool here: chance nodes dilute simulations across 21 rolls per ply,
+dice reset the tree each turn, and the value net is too accurate for selective deep search to
+pay — which is why no strong backgammon engine uses MCTS. Expectiminimax + rollouts is the
+paradigm.)*
+
+## 15. Strategic features on clean labels — ❌ failed again
+Experiment 7 (features under noisy TD self-play) failed, but that's the *worst* regime for
+extra inputs. Retested the 14 strategic features (198→212) on the clean 1-ply distillation
+labels — kept as a separate `strategic()` block so the 198 champion still runs and a 212-input
+candidate coexists. **Both raw-input injection (~48.9%) and NNUE-style after-first-ReLU
+injection (~47.8%) landed at parity with the 198 baseline (~48.3%).** Clean labels rescued raw
+from its old 31% collapse but produced no win. **Features are not the lever, in *any* regime —
+the raw 198 encoding already captures what they provide given a clean signal.**
+
+## 16. Exact bear-off EGTB — ◐ exact, but 0-ply-neutral
+Built the exact one-sided bear-off database by backward DP over all 54,264 home-board configs
+(no rollouts — the graph is a DAG in pip order): rolls-to-finish + rolls-to-first-checker
+distributions under expected-roll-minimising play, convolved into exact win/gammon race
+equities. Wired into the eval (`is_home_race` → table). **But attribution showed it's
+0-ply-neutral**: verified active (home-race eval `0.99990` table vs `0.99939` net), yet its
+ultra-precise values *never flip a 0-ply move choice* — a strong net already plays the same
+bear-off moves. So it adds nothing to 0-ply play; its value is for deeper search, cube
+decisions, and exact labels. A within-N-points hybrid extension (exact ≤9, mean+var 9–12) is
+queued.
 
 ---
 
@@ -223,7 +250,18 @@ backgammon engine uses MCTS. Expectiminimax + rollouts is the paradigm.)*
 - **Optimise the actual bottleneck.** The wave engine chased the matmul; the real cost was
   move generation. A micro-benchmark of the wrong stage (36× matmul) predicted a win that
   didn't materialise — profile the whole path, not a slice.
+- **A search-robust small gain beats a big 0-ply one.** v1.9.0's edge is tiny at 0-ply but
+  *holds* at 1-ply — the opposite of v1.7.0/v1.8.0, whose larger 0-ply gains evaporated under
+  search. Distilling *search value* (not static self-play) is what makes the gain survive
+  search. Prefer the improvement that lives at the ply the app actually plays.
+- **Compare on the *same* benchmark code — a tooling change can masquerade as strength.** A
+  gnubg-h2h fix (resolving crawling races by pip count, which the old code scored as non-wins)
+  lifted *every* net ~+3 points. It briefly looked like a parity breakthrough; on the corrected
+  metric the *champion itself* was already ~46% vs gnubg (not 42.7%), and 2-ply distillation
+  added only ~+1. Re-baseline every historical number when the harness changes.
 
 ## Shipped milestones
 - **v1.7.0** — pip-count output-bucketed net (experiment 5).
-- **v1.8.0** — class-aware routing net (experiment 6), current live net.
+- **v1.8.0** — class-aware routing net (experiment 6).
+- **v1.9.0** — 2-ply search-distillation net (experiment 14), current live net. Near-parity
+  with gnubg at 0-ply; the exact bear-off EGTB (§16) ships alongside for search/cube/labels.
