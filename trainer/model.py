@@ -200,11 +200,12 @@ class ValueNetBucketed(nn.Module):
     (`N_BUCKETS` = 8); the class-aware net uses `N_HEADS` = 12. Same body as ValueNet6.
     """
 
-    def __init__(self, hidden=(256, 128), act: str = "relu", n_heads: int = N_BUCKETS):
+    def __init__(self, hidden=(256, 128), act: str = "relu", n_heads: int = N_BUCKETS,
+                 num_inputs: int = NUM_INPUTS):
         super().__init__()
         sizes = [hidden] if isinstance(hidden, int) else list(hidden)
         layers = []
-        prev = NUM_INPUTS
+        prev = num_inputs
         for h in sizes:
             layers += [nn.Linear(prev, h), _activation(act)]
             prev = h
@@ -230,6 +231,64 @@ def net_bucketed_from_state(sd, hidden, act, n_heads: int = None) -> "ValueNetBu
     if n_heads is None:  # infer from the head layer's width
         n_heads = sd["heads.weight"].shape[0] // NUM_OUTCOMES
     net = ValueNetBucketed(hidden, act, n_heads)
+    net.load_state_dict(sd)
+    net.eval()
+    return net
+
+
+# Raw Tesauro inputs and the appended strategic add-on (see features.rs strategic()).
+RAW_INPUTS = 198
+STRAT_INPUTS = 14
+
+
+class ValueNetSplitBucketed(nn.Module):
+    """Like ValueNetBucketed, but the 14 strategic features are injected **after
+    the first ReLU** (the NNUE 'accumulator'), not at the raw input.
+
+    The first layer transforms only the 198 raw board inputs; the strategic
+    scalars are concatenated onto that activation and fed to the second layer, so
+    the head reads them directly instead of diluting them through the board
+    transform. Requires exactly two hidden layers. Input `x` is the full 212
+    (raw ++ strategic); the net splits it internally.
+    """
+
+    def __init__(self, hidden=(256, 128), act: str = "relu", n_heads: int = N_HEADS,
+                 raw_inputs: int = RAW_INPUTS, strat_inputs: int = STRAT_INPUTS):
+        super().__init__()
+        sizes = [hidden] if isinstance(hidden, int) else list(hidden)
+        assert len(sizes) == 2, "split-inject net needs exactly two hidden layers"
+        self.raw_inputs = raw_inputs
+        self.strat_inputs = strat_inputs
+        self.num_inputs = raw_inputs + strat_inputs
+        self.n_heads = n_heads
+        self.l1 = nn.Linear(raw_inputs, sizes[0])
+        self.a1 = _activation(act)
+        self.l2 = nn.Linear(sizes[0] + strat_inputs, sizes[1])
+        self.a2 = _activation(act)
+        self.heads = nn.Linear(sizes[1], n_heads * NUM_OUTCOMES)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        raw = x[..., : self.raw_inputs]
+        strat = x[..., self.raw_inputs : self.raw_inputs + self.strat_inputs]
+        h = self.a1(self.l1(raw))
+        h = torch.cat([h, strat], dim=-1)          # inject after the first ReLU
+        h = self.a2(self.l2(h))
+        return self.heads(h).view(*h.shape[:-1], self.n_heads, NUM_OUTCOMES)
+
+    def logits_for(self, x: torch.Tensor, buckets: torch.Tensor) -> torch.Tensor:
+        out = self.forward(x)
+        return out[torch.arange(out.size(0)), buckets]
+
+    def probs_for(self, x: torch.Tensor, buckets: torch.Tensor) -> torch.Tensor:
+        return torch.softmax(self.logits_for(x, buckets), dim=-1)
+
+
+def net_split_from_state(sd, hidden, act, n_heads: int = None) -> "ValueNetSplitBucketed":
+    if n_heads is None:
+        n_heads = sd["heads.weight"].shape[0] // NUM_OUTCOMES
+    raw_inputs = sd["l1.weight"].shape[1]
+    strat_inputs = sd["l2.weight"].shape[1] - sd["l1.weight"].shape[0]
+    net = ValueNetSplitBucketed(hidden, act, n_heads, raw_inputs, strat_inputs)
     net.load_state_dict(sd)
     net.eval()
     return net

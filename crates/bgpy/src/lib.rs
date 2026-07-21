@@ -54,6 +54,12 @@ impl PyBoard {
         bgengine::encode(&self.inner).to_vec()
     }
 
+    /// The 14 strategic add-on features (task #7): concatenate onto `features()`
+    /// for a 212-input net. Kept separate so the 198 champion still works.
+    fn strategic(&self) -> Vec<f32> {
+        bgengine::features::strategic(&self.inner).to_vec()
+    }
+
     /// Pip count for a side: `0` = mover, `1` = opponent.
     fn pip_count(&self, side: usize) -> i32 {
         self.inner.pip_count(side)
