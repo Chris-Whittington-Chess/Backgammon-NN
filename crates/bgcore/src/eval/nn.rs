@@ -128,10 +128,22 @@ impl NnEval {
     }
 }
 
+/// True when the exact bear-off table applies to `board`. Setting the
+/// `BG_NO_BEAROFF` env var forces the net path everywhere (for attribution
+/// benchmarks that isolate the net from the table). Read once.
+fn home_race(board: &Board) -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("BG_NO_BEAROFF").is_err()) {
+        return false;
+    }
+    crate::bearoff::is_home_race(board)
+}
+
 impl Evaluator for NnEval {
     fn evaluate(&self, board: &Board) -> Value {
         // A home-vs-home race is solved exactly by the bear-off table.
-        if crate::bearoff::is_home_race(board) {
+        if home_race(board) {
             return crate::bearoff::table().value(board);
         }
         self.fold(&self.run_batch(&features::encode(board), 1), board)
@@ -144,7 +156,7 @@ impl Evaluator for NnEval {
         // Home-race positions get the exact bear-off value; everything else goes
         // through the net in one batched pass, then we reassemble in input order.
         let net_boards: Vec<&Board> =
-            boards.iter().filter(|b| !crate::bearoff::is_home_race(b)).collect();
+            boards.iter().filter(|b| !home_race(b)).collect();
         let net_vals: Vec<Value> = if net_boards.is_empty() {
             Vec::new()
         } else {
@@ -162,7 +174,7 @@ impl Evaluator for NnEval {
         boards
             .iter()
             .map(|b| {
-                if crate::bearoff::is_home_race(b) {
+                if home_race(b) {
                     crate::bearoff::table().value(b)
                 } else {
                     net_it.next().unwrap()
