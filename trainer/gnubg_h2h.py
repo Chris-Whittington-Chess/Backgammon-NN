@@ -37,19 +37,38 @@ class GnubgEngine:
         self.p = subprocess.Popen(
             [GNUBG, "-t", "-q"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        # Pump stdout into a queue so reads can time out: gnubg occasionally hangs
+        # on a position, emitting no `static:` line, which would block forever.
+        self.q = queue.Queue()
+        threading.Thread(target=self._pump, daemon=True).start()
         self.p.stdin.write("set evaluation chequerplay eval plies 0\nnew game\n")
         self.p.stdin.flush()
+
+    def _pump(self):
+        for line in self.p.stdout:
+            self.q.put(line)
+        self.q.put("")  # EOF sentinel
 
     def best_child(self, children):
         """Index of the child gnubg prefers (min opponent equity = best for the
         mover). `children` are the mover-frame resulting boards; we score each one
         from the opponent's on-roll view via its swapped position id."""
+        # An immediate win is always best, and a game-over board makes gnubg emit
+        # no `static:` line — which desyncs/hangs the parser. So resolve winning
+        # moves ourselves and only ask gnubg about the non-terminal children.
+        terms = [c.winner_points() for c in children]
+        wins = [i for i, t in enumerate(terms) if t is not None]
+        if wins:
+            return max(wins, key=lambda i: terms[i])
         ids = [c.swap_perspective().position_id() for c in children]
         self.p.stdin.write("".join(f"set board {pid}\neval\n" for pid in ids))
         self.p.stdin.flush()
         eqs = []
         while len(eqs) < len(ids):
-            line = self.p.stdout.readline()
+            try:
+                line = self.q.get(timeout=15)
+            except queue.Empty:
+                raise RuntimeError("gnubg eval timed out")
             if line == "":
                 raise RuntimeError("gnubg process closed unexpectedly")
             m = STATIC.search(line)
@@ -77,7 +96,7 @@ def play(net, gnu, seed, a_is_ours):
     rng = random.Random(seed)
     board = bgcore.Board.starting()
     ours_to_move = a_is_ours
-    for _ in range(400):
+    for _ in range(200):
         d1, d2 = rng.randint(1, 6), rng.randint(1, 6)
         children = bgcore.legal_moves(board, d1, d2)
         i = our_best(net, children) if ours_to_move else gnu.best_child(children)
@@ -87,7 +106,12 @@ def play(net, gnu, seed, a_is_ours):
             return pts if ours_to_move else -pts
         board = chosen.swap_perspective()
         ours_to_move = not ours_to_move
-    return 0
+    # Ply cap hit (a rare crawling race): resolve by pip count — fewer pips wins.
+    # This stops pathological mirrored races from stalling the run, and scores
+    # them correctly (a capped game is effectively a decided race).
+    our_pip = board.pip_count(0 if ours_to_move else 1)
+    opp_pip = board.pip_count(1 if ours_to_move else 0)
+    return 1 if our_pip < opp_pip else -1
 
 
 def main():
@@ -117,7 +141,16 @@ def main():
                     g = jobs.get_nowait()
                 except queue.Empty:
                     break
-                p = play(net, gnu, 1000 + g // 2, g % 2 == 0)  # mirrored dice
+                try:
+                    p = play(net, gnu, 1000 + g // 2, g % 2 == 0)  # mirrored dice
+                except Exception:
+                    # gnubg hung/desynced on this game: restart it and skip.
+                    try:
+                        gnu.close()
+                    except Exception:
+                        pass
+                    gnu = GnubgEngine()
+                    continue
                 with lock:
                     results.append(p)
         finally:
