@@ -75,6 +75,23 @@ def _label_chunk(pos_id_chunk):
     return out
 
 
+def _atomic_savez(out, **arrays):
+    """Checkpoint write that survives a mid-write crash: write a sibling temp
+    file, then os.replace() it over `out` (atomic on the same filesystem, incl.
+    Windows). A reboot during the save leaves the previous checkpoint intact."""
+    out = Path(out)
+    tmp = out.with_name(out.name + ".tmp.npz")  # ends in .npz -> savez won't re-suffix
+    np.savez_compressed(tmp, **arrays)
+    for attempt in range(10):  # os.replace can transiently fail on Windows (AV/indexer lock)
+        try:
+            os.replace(tmp, out)
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.5)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", default="rollout_lambda1.npz",
@@ -89,6 +106,10 @@ def main():
     ap.add_argument("--chunk", type=int, default=2000, help="positions per work unit")
     ap.add_argument("--save-every", type=int, default=50000)
     ap.add_argument("--out", default="rollout_1ply.npz")
+    ap.add_argument("--resume", action="store_true",
+                    help="if --out already exists, keep its labeled prefix and only "
+                         "label the remaining positions (use the SAME --source/--limit/"
+                         "--limit-seed as the interrupted run)")
     args = ap.parse_args()
 
     src = np.load(MODELS / args.source)
@@ -106,10 +127,29 @@ def main():
           f"{args.net} (candidates={args.candidates}) | {args.workers} workers -> {args.out}",
           flush=True)
 
-    chunks = [pos_ids[i:i + args.chunk] for i in range(0, n, args.chunk)]
     probs = np.zeros((n, 6), dtype=np.float32)
+    # --resume: reuse the labeled prefix of an existing checkpoint. imap preserves
+    # source order and each checkpoint is pos_ids[:done], so a valid checkpoint is a
+    # prefix of this run's pos_ids -- verify that before trusting it.
+    start = 0
+    if args.resume and out.exists():
+        # `with` closes the file handle before the loop os.replace()s over `out`
+        # (Windows refuses to replace a file with an open handle).
+        with np.load(out) as prev:
+            ppid = prev["pos_ids"]
+            start = len(ppid)
+            if start > n or not np.array_equal(ppid, pos_ids[:start]):
+                raise SystemExit(
+                    f"--resume: {args.out} ({start} positions) is not a prefix of the "
+                    f"current source order -- re-run with the SAME --source/--limit/"
+                    f"--limit-seed as the interrupted run, or drop --resume to relabel.")
+            probs[:start] = prev["probs"]
+        print(f"resuming: {start}/{n} already labeled in {args.out}, "
+              f"{n - start} to go", flush=True)
+
+    chunks = [pos_ids[i:i + args.chunk] for i in range(start, n, args.chunk)]
     t0 = time.time()
-    done, last_save = 0, 0
+    done, last_save = start, start
     net_path = str(MODELS / args.net)
     with mp.Pool(args.workers, initializer=_init,
                  initargs=(net_path, args.lookahead, args.candidates)) as pool:
@@ -118,10 +158,10 @@ def main():
             done += len(res)
             if done - last_save >= args.save_every or done == n:
                 last_save = done
-                np.savez_compressed(out, pos_ids=pos_ids[:done], probs=probs[:done],
-                                    outcomes=outcomes[:done], buckets=buckets[:done],
-                                    trials=0, truncate=1, net=args.net)
-                rate = done / max(time.time() - t0, 1e-9)
+                _atomic_savez(out, pos_ids=pos_ids[:done], probs=probs[:done],
+                              outcomes=outcomes[:done], buckets=buckets[:done],
+                              trials=0, truncate=1, net=args.net)
+                rate = max(done - start, 1) / max(time.time() - t0, 1e-9)
                 eta_h = (n - done) / max(rate, 1e-9) / 3600
                 print(f"  {done:7d}/{n} | {rate:6.1f} pos/sec | ETA {eta_h:4.1f}h | saved",
                       flush=True)
