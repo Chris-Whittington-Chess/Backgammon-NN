@@ -42,6 +42,11 @@ venv/
 /build/
 /packaging/backgammon.ico
 
+# Transient run/build logs and benchmark dumps at the repo root
+/*.log
+/*.out
+/bench_*.json
+
 # Editor / OS
 .vscode/
 .idea/
