@@ -54,18 +54,25 @@ def label_nply(net, board):
     """The n-ply expectiminimax value distribution of `board`, for the side to
     move, as the mutually-exclusive 6-outcome [ws,wg,wbg,ls,lg,lbg]. The net's
     `lookahead`/`candidates` set the depth; the dice-averaging and PV propagation
-    run in Rust (search_dist). 1-ply here matches the earlier Python 1-ply label."""
+    run in Rust (search_dist). 1-ply here matches the earlier Python 1-ply label.
+    With selective deepening (`_SELECTIVE`) the all-rank-1 frontier is extended one
+    ply via `search_dist_ext`."""
+    if _SELECTIVE:
+        d5, _total, _ext = net.search_dist_ext(board)
+        return dist6_from5(d5)
     return dist6_from5(net.search_dist(board))
 
 
 # --- Multiprocessing: scores/dist hold the GIL, so parallelise across PROCESSES,
 #     each with its own Neural (like the gnubg h2h workers). ---
 _NET = None
+_SELECTIVE = False
 
 
-def _init(net_path, lookahead, candidates):
-    global _NET
-    _NET = bgcore.Neural(net_path, lookahead, candidates)  # one per worker process
+def _init(net_path, lookahead, candidates, cand_schedule, selective):
+    global _NET, _SELECTIVE
+    _NET = bgcore.Neural(net_path, lookahead, candidates, cand_schedule=cand_schedule)
+    _SELECTIVE = selective
 
 
 def _label_chunk(pos_id_chunk):
@@ -100,6 +107,11 @@ def main():
     ap.add_argument("--lookahead", type=int, default=1, help="search depth in half-moves")
     ap.add_argument("--candidates", type=int, default=0,
                     help="prune deep (2-ply+) nodes to the best N moves; 0 = full width")
+    ap.add_argument("--cand-schedule", type=int, nargs="+", default=None,
+                    help="per-ply candidate counts from the root inward (e.g. 3 3); "
+                         "overrides --candidates")
+    ap.add_argument("--selective", action="store_true",
+                    help="selective deepening: extend the all-rank-1 frontier by one ply")
     ap.add_argument("--limit", type=int, default=0, help="relabel a random N-subset")
     ap.add_argument("--limit-seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=max(1, os.cpu_count() - 2))
@@ -123,8 +135,10 @@ def main():
     n = len(pos_ids)
 
     out = MODELS / args.out
-    print(f"{args.lookahead}-ply distilling {n} positions from {args.source} with "
-          f"{args.net} (candidates={args.candidates}) | {args.workers} workers -> {args.out}",
+    mode = "selective-deepen " if args.selective else ""
+    cand_desc = args.cand_schedule if args.cand_schedule is not None else args.candidates
+    print(f"{args.lookahead}-ply {mode}distilling {n} positions from {args.source} with "
+          f"{args.net} (candidates={cand_desc}) | {args.workers} workers -> {args.out}",
           flush=True)
 
     probs = np.zeros((n, 6), dtype=np.float32)
@@ -152,7 +166,8 @@ def main():
     done, last_save = start, start
     net_path = str(MODELS / args.net)
     with mp.Pool(args.workers, initializer=_init,
-                 initargs=(net_path, args.lookahead, args.candidates)) as pool:
+                 initargs=(net_path, args.lookahead, args.candidates,
+                           args.cand_schedule, args.selective)) as pool:
         for res in pool.imap(_label_chunk, chunks):  # imap preserves input order
             probs[done:done + len(res)] = res
             done += len(res)
