@@ -7,11 +7,13 @@
 
 use crate::board::Board;
 
+pub mod cache;
 pub mod hce;
 #[cfg(feature = "onnx")]
 pub mod nn;
 pub mod random;
 
+pub use cache::CachedEval;
 pub use hce::HceEval;
 #[cfg(feature = "onnx")]
 pub use nn::{NnEval, PhaseEval};

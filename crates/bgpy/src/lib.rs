@@ -296,8 +296,26 @@ impl Neural {
     /// GIL. The distillation-label path (`trainer/gen_distil_data.py`).
     fn search_dist(&self, py: Python<'_>, board: &PyBoard) -> Vec<f32> {
         py.allow_threads(|| {
-            bgengine::position_dist(&board.inner, self.lookahead, self.candidates, &self.nn)
-                .to_vec()
+            // A per-search evaluation cache pays off only once the tree re-reaches
+            // positions (2-ply+); at 0/1-ply it would only add map overhead.
+            if self.lookahead >= 2 {
+                let eval = bgengine::eval::CachedEval::new(&self.nn);
+                bgengine::position_dist(&board.inner, self.lookahead, self.candidates, &eval)
+                    .to_vec()
+            } else {
+                bgengine::position_dist(&board.inner, self.lookahead, self.candidates, &self.nn)
+                    .to_vec()
+            }
+        })
+    }
+
+    /// Diagnostic: how many distinct positions the per-search eval cache holds
+    /// for one `(lookahead, candidates)` search of `board` — i.e. the hash size.
+    fn cache_entries(&self, py: Python<'_>, board: &PyBoard) -> usize {
+        py.allow_threads(|| {
+            let eval = bgengine::eval::CachedEval::new(&self.nn);
+            let _ = bgengine::position_dist(&board.inner, self.lookahead, self.candidates, &eval);
+            eval.cached()
         })
     }
 
@@ -306,13 +324,19 @@ impl Neural {
     /// search takes a fair fraction of a second and the GUI stays responsive.
     fn scores(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8) -> Vec<f32> {
         py.allow_threads(|| {
-            bgengine::score_moves(
-                &board.inner,
-                &Dice::new(d1, d2),
-                self.lookahead,
-                self.candidates,
-                &self.nn,
-            )
+            let dice = Dice::new(d1, d2);
+            if self.lookahead >= 2 {
+                let eval = bgengine::eval::CachedEval::new(&self.nn);
+                bgengine::score_moves(&board.inner, &dice, self.lookahead, self.candidates, &eval)
+            } else {
+                bgengine::score_moves(
+                    &board.inner,
+                    &dice,
+                    self.lookahead,
+                    self.candidates,
+                    &self.nn,
+                )
+            }
         })
     }
 }
