@@ -258,6 +258,21 @@ struct Neural {
     nn: bgengine::eval::NnEval,
     lookahead: u8,
     candidates: usize,
+    /// Per-*remaining-depth* candidate limits (built from the root-inward
+    /// `cand_schedule`); `None` = uniform `candidates` at every ply.
+    schedule: Option<Vec<usize>>,
+}
+
+#[cfg(feature = "onnx")]
+impl Neural {
+    /// The candidate rule the search should use: the per-ply schedule if one was
+    /// given, else uniform `candidates`.
+    fn cands(&self) -> bgengine::Cands<'_> {
+        match &self.schedule {
+            Some(s) => bgengine::Cands::PerDepth(s),
+            None => bgengine::Cands::Uniform(self.candidates),
+        }
+    }
 }
 
 #[cfg(feature = "onnx")]
@@ -265,11 +280,32 @@ struct Neural {
 impl Neural {
     /// `lookahead` is the search depth in half-moves (0 = static eval).
     /// `candidates` bounds the branching of 2-ply+ search; 0 = full width.
+    /// `cand_schedule`, if given, overrides `candidates` with a per-ply schedule
+    /// listed from the ROOT inward: `[c_root, c_next, ...]` (e.g. `[6, 3]` keeps
+    /// the best 6 moves at the root and 3 one ply deeper). Plies past the list's
+    /// end fall back to full width. Applies to `search_dist` (the label path).
     #[new]
-    #[pyo3(signature = (onnx_path, lookahead = 0, candidates = 0))]
-    fn new(onnx_path: &str, lookahead: u8, candidates: usize) -> PyResult<Self> {
+    #[pyo3(signature = (onnx_path, lookahead = 0, candidates = 0, cand_schedule = None))]
+    fn new(
+        onnx_path: &str,
+        lookahead: u8,
+        candidates: usize,
+        cand_schedule: Option<Vec<usize>>,
+    ) -> PyResult<Self> {
         let nn = bgengine::eval::NnEval::from_path(onnx_path).map_err(PyValueError::new_err)?;
-        Ok(Neural { nn, lookahead, candidates })
+        // Re-index the root-inward schedule by *remaining depth* (how the search
+        // consults it): the root has `lookahead` plies left, so entry i -> depth
+        // lookahead-i. Extra entries (deeper than the search) are ignored.
+        let schedule = cand_schedule.map(|by_ply| {
+            let mut s = vec![0usize; lookahead as usize + 1];
+            for (i, &c) in by_ply.iter().enumerate() {
+                if let Some(depth) = (lookahead as usize).checked_sub(i) {
+                    s[depth] = c;
+                }
+            }
+            s
+        });
+        Ok(Neural { nn, lookahead, candidates, schedule })
     }
 
     /// Static (0-ply) net equity for the side to move.
@@ -296,25 +332,25 @@ impl Neural {
     /// GIL. The distillation-label path (`trainer/gen_distil_data.py`).
     fn search_dist(&self, py: Python<'_>, board: &PyBoard) -> Vec<f32> {
         py.allow_threads(|| {
+            let cands = self.cands();
             // A per-search evaluation cache pays off only once the tree re-reaches
             // positions (2-ply+); at 0/1-ply it would only add map overhead.
             if self.lookahead >= 2 {
                 let eval = bgengine::eval::CachedEval::new(&self.nn);
-                bgengine::position_dist(&board.inner, self.lookahead, self.candidates, &eval)
-                    .to_vec()
+                bgengine::position_dist_cands(&board.inner, self.lookahead, cands, &eval).to_vec()
             } else {
-                bgengine::position_dist(&board.inner, self.lookahead, self.candidates, &self.nn)
-                    .to_vec()
+                bgengine::position_dist_cands(&board.inner, self.lookahead, cands, &self.nn).to_vec()
             }
         })
     }
 
     /// Diagnostic: how many distinct positions the per-search eval cache holds
-    /// for one `(lookahead, candidates)` search of `board` — i.e. the hash size.
+    /// for one search of `board` at this evaluator's `(lookahead, candidates/
+    /// schedule)` — i.e. the hash size.
     fn cache_entries(&self, py: Python<'_>, board: &PyBoard) -> usize {
         py.allow_threads(|| {
             let eval = bgengine::eval::CachedEval::new(&self.nn);
-            let _ = bgengine::position_dist(&board.inner, self.lookahead, self.candidates, &eval);
+            let _ = bgengine::position_dist_cands(&board.inner, self.lookahead, self.cands(), &eval);
             eval.cached()
         })
     }

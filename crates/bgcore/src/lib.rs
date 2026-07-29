@@ -36,4 +36,6 @@ pub use rollout::{
     build_pool, rollout_best, rollout_best_scored, rollout_dist, rollout_dist_wave, rollout_equity,
     RolloutConfig, RolloutEngine,
 };
-pub use search::{position_dist, position_value, score_moves, SearchEngine};
+pub use search::{
+    position_dist, position_dist_cands, position_value, score_moves, Cands, SearchEngine,
+};

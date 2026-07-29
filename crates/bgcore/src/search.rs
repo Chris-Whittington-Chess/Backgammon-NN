@@ -13,6 +13,29 @@ use crate::eval::Evaluator;
 use crate::game::{result, Engine, GameResult};
 use crate::moves::{genmoves, Move};
 
+/// How many moves to keep at a pruned node, as a function of its *remaining*
+/// search depth. `Uniform(n)` keeps `n` everywhere (`0` = full width — the old
+/// single-`candidates` behaviour). `PerDepth(s)` keeps `s[depth]` at a node with
+/// that remaining depth (out of range ⇒ full width), so a search can prune wider
+/// near the root than deep — for a D-ply search `s[D]` is the root, `s[D-1]` the
+/// next ply, and `s[1]`/`s[0]` are unused (the last ply and leaves aren't pruned).
+#[derive(Clone, Copy)]
+pub enum Cands<'a> {
+    Uniform(usize),
+    PerDepth(&'a [usize]),
+}
+
+impl Cands<'_> {
+    /// Candidate limit at a node with `depth` half-moves remaining (`0` = full width).
+    #[inline]
+    fn at(&self, depth: u8) -> usize {
+        match self {
+            Cands::Uniform(n) => *n,
+            Cands::PerDepth(s) => s.get(depth as usize).copied().unwrap_or(0),
+        }
+    }
+}
+
 /// Static (0-ply) value of each move's result to the side that just moved: its
 /// points if the move wins outright, else the negated opponent equity.
 ///
@@ -152,10 +175,21 @@ pub fn position_dist<E: Evaluator>(
     candidates: usize,
     eval: &E,
 ) -> [f32; 5] {
-    pvd(board, depth, eval, candidates)
+    pvd(board, depth, eval, Cands::Uniform(candidates))
 }
 
-fn pvd<E: Evaluator>(board: &Board, depth: u8, eval: &E, candidates: usize) -> [f32; 5] {
+/// Like [`position_dist`] but with a per-ply candidate schedule (see [`Cands`]),
+/// so a distillation teacher can search wider near the root than deep.
+pub fn position_dist_cands<E: Evaluator>(
+    board: &Board,
+    depth: u8,
+    cands: Cands,
+    eval: &E,
+) -> [f32; 5] {
+    pvd(board, depth, eval, cands)
+}
+
+fn pvd<E: Evaluator>(board: &Board, depth: u8, eval: &E, cands: Cands) -> [f32; 5] {
     match result(board) {
         GameResult::MoverWins(p) => return win_vec5(p),
         GameResult::OppWins(p) => return flip5(win_vec5(p)),
@@ -186,11 +220,12 @@ fn pvd<E: Evaluator>(board: &Board, depth: u8, eval: &E, candidates: usize) -> [
                 continue;
             }
 
-            // Prune to the best `candidates` before the deep search (mirrors `pv`).
-            if candidates > 0 && moves.len() > candidates {
+            // Prune to the best `c` for this ply before the deep search (mirrors `pv`).
+            let c = cands.at(depth);
+            if c > 0 && moves.len() > c {
                 let mut idx: Vec<usize> = (0..moves.len()).collect();
                 idx.sort_by(|&i, &j| vals[j].partial_cmp(&vals[i]).unwrap());
-                idx.truncate(candidates);
+                idx.truncate(c);
                 idx.sort_unstable();
                 let keep: Vec<Move> = idx.iter().map(|&i| moves[i].clone()).collect();
                 moves = keep;
@@ -202,7 +237,7 @@ fn pvd<E: Evaluator>(board: &Board, depth: u8, eval: &E, candidates: usize) -> [
             for m in &moves {
                 let d = match result(&m.result) {
                     GameResult::MoverWins(p) => win_vec5(p),
-                    _ => flip5(pvd(&m.result.swap_perspective(), depth - 1, eval, candidates)),
+                    _ => flip5(pvd(&m.result.swap_perspective(), depth - 1, eval, cands)),
                 };
                 let eq = equity5(d);
                 if eq > best_eq {
