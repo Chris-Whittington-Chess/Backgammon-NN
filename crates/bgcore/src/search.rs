@@ -7,6 +7,8 @@
 //! (`candidates`). This keeps 2-ply to a fraction of a second per move with
 //! little strength loss.
 
+use std::cell::Cell;
+
 use crate::board::Board;
 use crate::dice::Dice;
 use crate::eval::Evaluator;
@@ -251,6 +253,123 @@ fn pvd<E: Evaluator>(board: &Board, depth: u8, eval: &E, cands: Cands) -> [f32; 
     acc
 }
 
+// --- Selective deepening (prototype) -----------------------------------------
+//
+// Extends the "all-rank-1" frontier by one ply: a leaf whose every ancestor
+// candidate-choice (per dice roll) was that node's rank-1 (best static) move is
+// searched one ply deeper instead of statically evaluated. This spends the extra
+// depth on the lines that determine the value, at a fraction of a full extra
+// ply's cost — ~1/C^(D-1) of leaves for a D-ply, C-candidate search (1/9 for
+// 3-ply/C=3, and higher wherever a node has fewer than C legal moves).
+
+/// Tallies base leaves visited vs. leaves extended, for instrumentation.
+struct ExtCount {
+    total: Cell<u64>,
+    extended: Cell<u64>,
+}
+
+/// Selective-deepening distribution search. `on_pv` stays true while every
+/// ancestor candidate-choice on this roll-path was the rank-1 move; such leaves
+/// are extended by one ply (a plain depth-1 [`pvd`]). Folds like [`pvd`]; with
+/// `on_pv` forced false it *is* `pvd` (see `pvd_ext_offpv_matches_pvd`).
+fn pvd_ext<E: Evaluator>(
+    board: &Board,
+    depth: u8,
+    eval: &E,
+    cands: Cands,
+    on_pv: bool,
+    cnt: &ExtCount,
+) -> [f32; 5] {
+    match result(board) {
+        GameResult::MoverWins(p) => return win_vec5(p),
+        GameResult::OppWins(p) => return flip5(win_vec5(p)),
+        GameResult::InProgress => {}
+    }
+    if depth == 0 {
+        let v = eval.evaluate(board);
+        return [v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg];
+    }
+
+    let mut acc = [0.0f32; 5];
+    for a in 1..=6u8 {
+        for c in a..=6u8 {
+            let weight = if a == c { 1.0 / 36.0 } else { 2.0 / 36.0 };
+            let moves = genmoves(board, &Dice::new(a, c));
+            let vals = shallow_all(&moves, eval);
+            // rank-1 = first index holding the max static value (matches `pv`).
+            let mut r1 = 0usize;
+            for i in 1..vals.len() {
+                if vals[i] > vals[r1] {
+                    r1 = i;
+                }
+            }
+
+            if depth == 1 {
+                // Leaf ply: take the static-best move, extend it a ply if on-PV.
+                cnt.total.set(cnt.total.get() + 1);
+                let d = if on_pv {
+                    cnt.extended.set(cnt.extended.get() + 1);
+                    match result(&moves[r1].result) {
+                        GameResult::MoverWins(p) => win_vec5(p),
+                        _ => flip5(pvd(&moves[r1].result.swap_perspective(), 1, eval, cands)),
+                    }
+                } else {
+                    leaf_dist(&moves[r1], eval)
+                };
+                acc = add5(acc, scale5(weight, d));
+                continue;
+            }
+
+            // Deeper node: keep the best `cc` (restored to original order, as
+            // `pvd` does), recurse, take the equity-best; only the rank-1 child
+            // stays on-PV.
+            let cc = cands.at(depth);
+            let mut idx: Vec<usize> = (0..moves.len()).collect();
+            if cc > 0 && idx.len() > cc {
+                idx.sort_by(|&i, &j| vals[j].partial_cmp(&vals[i]).unwrap());
+                idx.truncate(cc);
+                idx.sort_unstable();
+            }
+            let mut best_eq = f32::NEG_INFINITY;
+            let mut best = [0.0f32; 5];
+            for &i in &idx {
+                let child_pv = on_pv && i == r1;
+                let d = match result(&moves[i].result) {
+                    GameResult::MoverWins(p) => win_vec5(p),
+                    _ => flip5(pvd_ext(
+                        &moves[i].result.swap_perspective(),
+                        depth - 1,
+                        eval,
+                        cands,
+                        child_pv,
+                        cnt,
+                    )),
+                };
+                let eq = equity5(d);
+                if eq > best_eq {
+                    best_eq = eq;
+                    best = d;
+                }
+            }
+            acc = add5(acc, scale5(weight, best));
+        }
+    }
+    acc
+}
+
+/// Selective-deepening [`position_dist`]: returns the searched distribution plus
+/// `(total_leaves, extended_leaves)` for instrumentation.
+pub fn position_dist_ext<E: Evaluator>(
+    board: &Board,
+    depth: u8,
+    cands: Cands,
+    eval: &E,
+) -> ([f32; 5], u64, u64) {
+    let cnt = ExtCount { total: Cell::new(0), extended: Cell::new(0) };
+    let d = pvd_ext(board, depth, eval, cands, true, &cnt);
+    (d, cnt.total.get(), cnt.extended.get())
+}
+
 /// Equity of every legal move for `dice`, from the mover's perspective, in
 /// [`genmoves`] order — the ranked list a GUI needs (best move, hints, and the
 /// cost of the alternatives), not just the single pick [`SearchEngine::choose`]
@@ -376,6 +495,32 @@ mod tests {
         // Candidate-pruned 2-ply should produce a finite value quickly.
         let v = pv(&Board::starting_position(), 2, &HceEval::new(), 4);
         assert!(v.is_finite() && v.abs() <= 3.0);
+    }
+
+    /// With the PV flag forced off, selective deepening is exactly the base
+    /// `pvd` (nothing extended) — the extension is the only behavioural change.
+    #[test]
+    fn pvd_ext_offpv_matches_pvd() {
+        let hce = HceEval::new();
+        let cnt = ExtCount { total: Cell::new(0), extended: Cell::new(0) };
+        let b = Board::starting_position();
+        // Full width is cheap only to 2-ply; check the deeper (3-ply) case pruned.
+        for depth in [1u8, 2] {
+            assert_eq!(
+                pvd(&b, depth, &hce, Cands::Uniform(0)),
+                pvd_ext(&b, depth, &hce, Cands::Uniform(0), false, &cnt),
+                "off-PV pvd_ext != pvd (full width) at depth {depth}"
+            );
+        }
+        for depth in [2u8, 3] {
+            assert_eq!(
+                pvd(&b, depth, &hce, Cands::Uniform(2)),
+                pvd_ext(&b, depth, &hce, Cands::Uniform(2), false, &cnt),
+                "off-PV pvd_ext != pvd (pruned) at depth {depth}"
+            );
+        }
+        assert_eq!(cnt.extended.get(), 0, "off-PV must extend nothing");
+        assert!(cnt.total.get() > 0, "leaves should have been counted");
     }
 
     /// First index holding the maximum — the same tie-break `choose` uses (it

@@ -355,6 +355,18 @@ impl Neural {
         })
     }
 
+    /// Prototype: selective-deepening search distribution. Like `search_dist` but
+    /// extends the all-rank-1 frontier one ply deeper. Returns `(dist5, total_leaves,
+    /// extended_leaves)` so callers can measure the actual extension rate.
+    fn search_dist_ext(&self, py: Python<'_>, board: &PyBoard) -> (Vec<f32>, u64, u64) {
+        py.allow_threads(|| {
+            let eval = bgengine::eval::CachedEval::new(&self.nn);
+            let (d, total, ext) =
+                bgengine::position_dist_ext(&board.inner, self.lookahead, self.cands(), &eval);
+            (d.to_vec(), total, ext)
+        })
+    }
+
     /// Equity of each legal move for `d1, d2` from the mover's perspective,
     /// aligned index-for-index with [`legal_moves`]. Releases the GIL: a 2-ply
     /// search takes a fair fraction of a second and the GUI stays responsive.
