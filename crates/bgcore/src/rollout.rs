@@ -316,7 +316,7 @@ fn orient(v: [f32; 5], plies: usize) -> [f32; 5] {
 
 /// One playout, returning the outcome distribution `[win, win_g, win_bg,
 /// lose_g, lose_bg]` from the perspective of `board`'s side to move.
-fn rollout_once_dist<E: Evaluator>(
+pub(crate) fn rollout_once_dist<E: Evaluator>(
     board: &Board,
     eval: &E,
     truncate: usize,

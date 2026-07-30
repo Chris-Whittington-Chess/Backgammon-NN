@@ -37,6 +37,6 @@ pub use rollout::{
     RolloutConfig, RolloutEngine,
 };
 pub use search::{
-    position_dist, position_dist_cands, position_dist_ext, position_value, score_moves, Cands,
-    SearchEngine,
+    position_dist, position_dist_cands, position_dist_ext, position_value, score_moves,
+    score_moves_ext, score_moves_pass, Cands, SearchEngine,
 };

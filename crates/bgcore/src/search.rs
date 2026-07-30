@@ -8,12 +8,20 @@
 //! little strength loss.
 
 use std::cell::Cell;
+use std::hash::{Hash, Hasher};
 
 use crate::board::Board;
-use crate::dice::Dice;
+use crate::dice::{Dice, Rng};
 use crate::eval::Evaluator;
 use crate::game::{result, Engine, GameResult};
 use crate::moves::{genmoves, Move};
+
+/// Deterministic per-position seed so the sampled PV extension is reproducible.
+fn board_seed(b: &Board) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    b.hash(&mut h);
+    h.finish() ^ 0x9E37_79B9_7F4A_7C15
+}
 
 /// How many moves to keep at a pruned node, as a function of its *remaining*
 /// search depth. `Uniform(n)` keeps `n` everywhere (`0` = full width — the old
@@ -122,6 +130,122 @@ fn pv<E: Evaluator>(board: &Board, depth: u8, eval: &E, candidates: usize) -> f3
         }
     }
     total
+}
+
+// --- Pass extension -----------------------------------------------------------
+//
+// A forced pass (dance: no legal move for a roll) is a null, non-branching ply.
+// Here it does NOT consume a depth ply, so the opponent's reply is searched one
+// ply deeper — cheap, and it fires only in forced (closed-out / blocked) lines
+// where the static eval is least reliable. Explosion guard: an absolute-ply
+// counter that always advances; when it reaches `abs_cap` the node is statically
+// evaluated no matter what, so pass-heavy lines can't recurse without bound.
+
+/// `pv` with the pass extension. Equal to `pv` on any line with no forced passes.
+#[allow(clippy::too_many_arguments)]
+fn pv_pass<E: Evaluator>(
+    board: &Board,
+    depth: u8,
+    abs_ply: u16,
+    abs_cap: u16,
+    eval: &E,
+    candidates: usize,
+) -> f32 {
+    match result(board) {
+        GameResult::MoverWins(p) => return p as f32,
+        GameResult::OppWins(p) => return -(p as f32),
+        GameResult::InProgress => {}
+    }
+    if depth == 0 || abs_ply >= abs_cap {
+        return eval.evaluate(board).equity();
+    }
+
+    let mut total = 0.0f32;
+    // Every pass-die at this node recurses to the SAME opponent board (the board is
+    // unchanged by a dance), so compute that value once and reuse it — otherwise a
+    // fully-closed-out node recurses 21x per level and nests 21^depth. This dedup,
+    // together with `abs_cap`, is what makes the extension safe.
+    let mut pass_value: Option<f32> = None;
+    for a in 1..=6u8 {
+        for c in a..=6u8 {
+            let weight = if a == c { 1.0 / 36.0 } else { 2.0 / 36.0 };
+            let mut moves = genmoves(board, &Dice::new(a, c));
+
+            // Dance for this roll: a single pass move whose result is the unchanged
+            // board. Recurse the opponent WITHOUT decrementing depth (the guard
+            // still advances via abs_ply).
+            if moves.len() == 1 && moves[0].result == *board {
+                let v = *pass_value.get_or_insert_with(|| {
+                    -pv_pass(&board.swap_perspective(), depth, abs_ply + 1, abs_cap, eval, candidates)
+                });
+                total += weight * v;
+                continue;
+            }
+
+            let vals = shallow_all(&moves, eval);
+            if depth == 1 {
+                total += weight * vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                continue;
+            }
+            if candidates > 0 && moves.len() > candidates {
+                let mut idx: Vec<usize> = (0..moves.len()).collect();
+                idx.sort_by(|&i, &j| vals[j].partial_cmp(&vals[i]).unwrap());
+                idx.truncate(candidates);
+                idx.sort_unstable();
+                let mut keep = idx.iter().map(|&i| moves[i].clone()).collect();
+                std::mem::swap(&mut moves, &mut keep);
+            }
+            let mut best = f32::NEG_INFINITY;
+            for m in &moves {
+                let v = match result(&m.result) {
+                    GameResult::MoverWins(p) => p as f32,
+                    _ => -pv_pass(
+                        &m.result.swap_perspective(),
+                        depth - 1,
+                        abs_ply + 1,
+                        abs_cap,
+                        eval,
+                        candidates,
+                    ),
+                };
+                if v > best {
+                    best = v;
+                }
+            }
+            total += weight * best;
+        }
+    }
+    total
+}
+
+/// Per-move equities like [`score_moves`] but with the pass extension in the deep
+/// search. `max_pass_ext` bounds how many extra plies passes may add per line.
+pub fn score_moves_pass<E: Evaluator>(
+    board: &Board,
+    dice: &Dice,
+    depth: u8,
+    candidates: usize,
+    eval: &E,
+    max_pass_ext: u16,
+) -> Vec<f32> {
+    let moves = genmoves(board, dice);
+    let mut scores = shallow_all(&moves, eval);
+    if depth == 0 {
+        return scores;
+    }
+    let abs_cap = depth as u16 + max_pass_ext;
+    let mut order: Vec<usize> = (0..moves.len()).collect();
+    if depth >= 2 && candidates > 0 && moves.len() > candidates {
+        order.sort_by(|&i, &j| scores[j].partial_cmp(&scores[i]).unwrap());
+        order.truncate(candidates);
+    }
+    for &i in &order {
+        scores[i] = match result(&moves[i].result) {
+            GameResult::MoverWins(p) => p as f32,
+            _ => -pv_pass(&moves[i].result.swap_perspective(), depth, 0, abs_cap, eval, candidates),
+        };
+    }
+    scores
 }
 
 // --- Distribution-returning search --------------------------------------------
@@ -278,6 +402,8 @@ fn pvd_ext<E: Evaluator>(
     eval: &E,
     cands: Cands,
     on_pv: bool,
+    ext_plies: u8,
+    ext_cands: usize,
     cnt: &ExtCount,
 ) -> [f32; 5] {
     match result(board) {
@@ -307,11 +433,29 @@ fn pvd_ext<E: Evaluator>(
             if depth == 1 {
                 // Leaf ply: take the static-best move, extend it a ply if on-PV.
                 cnt.total.set(cnt.total.get() + 1);
-                let d = if on_pv {
+                let d = if on_pv && ext_plies > 0 {
                     cnt.extended.set(cnt.extended.get() + 1);
                     match result(&moves[r1].result) {
                         GameResult::MoverWins(p) => win_vec5(p),
-                        _ => flip5(pvd(&moves[r1].result.swap_perspective(), 1, eval, cands)),
+                        _ => {
+                            // (1,1)-style sampled rollout on the PV: from the leaf's
+                            // (already-chosen) best-move result, play `ext_plies`
+                            // greedy SAMPLED plies then truncate+eval, averaged over
+                            // `ext_cands` trials. An EVEN ext_plies lands the
+                            // truncation on the base leaf's parity. One move-gen +
+                            // eval per ply — far cheaper than enumerating all dice.
+                            let start = moves[r1].result.swap_perspective();
+                            let trials = ext_cands.max(1);
+                            let mut seed = board_seed(&start);
+                            let mut acc = [0.0f32; 5];
+                            for _ in 0..trials {
+                                let mut rng = Rng::new(seed);
+                                acc = add5(acc, crate::rollout::rollout_once_dist(
+                                    &start, eval, ext_plies as usize, false, &mut rng));
+                                seed = seed.wrapping_mul(0x2545_F491_4F6C_DD1D).wrapping_add(1);
+                            }
+                            flip5(scale5(1.0 / trials as f32, acc))
+                        }
                     }
                 } else {
                     leaf_dist(&moves[r1], eval)
@@ -342,6 +486,8 @@ fn pvd_ext<E: Evaluator>(
                         eval,
                         cands,
                         child_pv,
+                        ext_plies,
+                        ext_cands,
                         cnt,
                     )),
                 };
@@ -364,9 +510,11 @@ pub fn position_dist_ext<E: Evaluator>(
     depth: u8,
     cands: Cands,
     eval: &E,
+    ext_plies: u8,
+    ext_cands: usize,
 ) -> ([f32; 5], u64, u64) {
     let cnt = ExtCount { total: Cell::new(0), extended: Cell::new(0) };
-    let d = pvd_ext(board, depth, eval, cands, true, &cnt);
+    let d = pvd_ext(board, depth, eval, cands, true, ext_plies, ext_cands, &cnt);
     (d, cnt.total.get(), cnt.extended.get())
 }
 
@@ -403,6 +551,50 @@ pub fn score_moves<E: Evaluator>(
         scores[i] = match result(&moves[i].result) {
             GameResult::MoverWins(p) => p as f32,
             _ => -pv(&moves[i].result.swap_perspective(), depth, eval, candidates),
+        };
+    }
+    scores
+}
+
+/// Like [`score_moves`] but scores each searched candidate through the
+/// distribution search, optionally with selective deepening (`selective` routes
+/// the deep search through [`pvd_ext`], extending the all-rank-1 frontier one
+/// ply). With `selective == false` it folds to the same equities as
+/// [`score_moves`] — so an A/B of the two isolates the extension at play time.
+pub fn score_moves_ext<E: Evaluator>(
+    board: &Board,
+    dice: &Dice,
+    depth: u8,
+    candidates: usize,
+    eval: &E,
+    ext_plies: u8,
+    ext_cands: usize,
+) -> Vec<f32> {
+    let moves = genmoves(board, dice);
+    let mut scores = shallow_all(&moves, eval);
+    if depth == 0 {
+        return scores;
+    }
+    let cands = Cands::Uniform(candidates);
+    let cnt = ExtCount { total: Cell::new(0), extended: Cell::new(0) };
+
+    let mut order: Vec<usize> = (0..moves.len()).collect();
+    if depth >= 2 && candidates > 0 && moves.len() > candidates {
+        order.sort_by(|&i, &j| scores[j].partial_cmp(&scores[i]).unwrap());
+        order.truncate(candidates);
+    }
+    for &i in &order {
+        scores[i] = match result(&moves[i].result) {
+            GameResult::MoverWins(p) => p as f32,
+            _ => {
+                let child = moves[i].result.swap_perspective();
+                let d = if ext_plies > 0 {
+                    pvd_ext(&child, depth, eval, cands, true, ext_plies, ext_cands, &cnt)
+                } else {
+                    pvd(&child, depth, eval, cands)
+                };
+                -equity5(d)
+            }
         };
     }
     scores
@@ -508,14 +700,14 @@ mod tests {
         for depth in [1u8, 2] {
             assert_eq!(
                 pvd(&b, depth, &hce, Cands::Uniform(0)),
-                pvd_ext(&b, depth, &hce, Cands::Uniform(0), false, &cnt),
+                pvd_ext(&b, depth, &hce, Cands::Uniform(0), false, 2, 1, &cnt),
                 "off-PV pvd_ext != pvd (full width) at depth {depth}"
             );
         }
         for depth in [2u8, 3] {
             assert_eq!(
                 pvd(&b, depth, &hce, Cands::Uniform(2)),
-                pvd_ext(&b, depth, &hce, Cands::Uniform(2), false, &cnt),
+                pvd_ext(&b, depth, &hce, Cands::Uniform(2), false, 2, 1, &cnt),
                 "off-PV pvd_ext != pvd (pruned) at depth {depth}"
             );
         }

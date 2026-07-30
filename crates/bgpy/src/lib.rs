@@ -252,6 +252,11 @@ fn hce_move(board: &PyBoard, d1: u8, d2: u8) -> PyBoard {
 /// embeds the ONNX runtime) plus `td.onnx`, and needs neither PyTorch nor
 /// onnxruntime. It is also far faster than searching from Python — the whole
 /// search runs in Rust instead of crossing the FFI boundary per position.
+/// Default cap on extra plies a forced-pass chain may add to the search (the
+/// burned-in pass extension's explosion guard).
+#[cfg(feature = "onnx")]
+const PASS_EXT_MAX: u16 = 8;
+
 #[cfg(feature = "onnx")]
 #[pyclass]
 struct Neural {
@@ -358,11 +363,13 @@ impl Neural {
     /// Prototype: selective-deepening search distribution. Like `search_dist` but
     /// extends the all-rank-1 frontier one ply deeper. Returns `(dist5, total_leaves,
     /// extended_leaves)` so callers can measure the actual extension rate.
-    fn search_dist_ext(&self, py: Python<'_>, board: &PyBoard) -> (Vec<f32>, u64, u64) {
+    #[pyo3(signature = (board, ext_plies = 1, ext_cands = 3))]
+    fn search_dist_ext(&self, py: Python<'_>, board: &PyBoard, ext_plies: u8, ext_cands: usize)
+        -> (Vec<f32>, u64, u64) {
         py.allow_threads(|| {
             let eval = bgengine::eval::CachedEval::new(&self.nn);
-            let (d, total, ext) =
-                bgengine::position_dist_ext(&board.inner, self.lookahead, self.cands(), &eval);
+            let (d, total, ext) = bgengine::position_dist_ext(
+                &board.inner, self.lookahead, self.cands(), &eval, ext_plies, ext_cands);
             (d.to_vec(), total, ext)
         })
     }
@@ -373,17 +380,56 @@ impl Neural {
     fn scores(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8) -> Vec<f32> {
         py.allow_threads(|| {
             let dice = Dice::new(d1, d2);
+            // Pass extension is burned in: a forced dance doesn't consume a ply, so
+            // the opponent's reply is searched deeper (bounded by PASS_EXT_MAX). Safe
+            // (guarded, ~2x cost on pass-heavy positions), and slightly favourable in
+            // blocked/closed-out spots where the static eval is weakest.
             if self.lookahead >= 2 {
                 let eval = bgengine::eval::CachedEval::new(&self.nn);
-                bgengine::score_moves(&board.inner, &dice, self.lookahead, self.candidates, &eval)
+                bgengine::score_moves_pass(
+                    &board.inner, &dice, self.lookahead, self.candidates, &eval, PASS_EXT_MAX)
             } else {
-                bgengine::score_moves(
-                    &board.inner,
-                    &dice,
-                    self.lookahead,
-                    self.candidates,
-                    &self.nn,
-                )
+                bgengine::score_moves_pass(
+                    &board.inner, &dice, self.lookahead, self.candidates, &self.nn, PASS_EXT_MAX)
+            }
+        })
+    }
+
+    /// Per-move equities like `scores`, but with the PASS extension: a forced
+    /// dance doesn't consume a ply, so the opponent's reply is searched deeper.
+    /// `max_pass_ext` caps the extra plies per line (explosion guard). Equals
+    /// `scores` on any position whose search hits no forced passes.
+    #[pyo3(signature = (board, d1, d2, max_pass_ext = 8))]
+    fn scores_pass(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8,
+                   max_pass_ext: u16) -> Vec<f32> {
+        py.allow_threads(|| {
+            let dice = Dice::new(d1, d2);
+            if self.lookahead >= 2 {
+                let eval = bgengine::eval::CachedEval::new(&self.nn);
+                bgengine::score_moves_pass(
+                    &board.inner, &dice, self.lookahead, self.candidates, &eval, max_pass_ext)
+            } else {
+                bgengine::score_moves_pass(
+                    &board.inner, &dice, self.lookahead, self.candidates, &self.nn, max_pass_ext)
+            }
+        })
+    }
+
+    /// Per-move equities like `scores`, but selectively deepening the all-rank-1
+    /// frontier by `ext_plies` (0 = plain, matches `scores`; use an EVEN count to
+    /// preserve leaf parity). A/B the extension at play time.
+    #[pyo3(signature = (board, d1, d2, ext_plies = 0, ext_cands = 3))]
+    fn scores_ext(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8,
+                  ext_plies: u8, ext_cands: usize) -> Vec<f32> {
+        py.allow_threads(|| {
+            let dice = Dice::new(d1, d2);
+            if self.lookahead >= 2 {
+                let eval = bgengine::eval::CachedEval::new(&self.nn);
+                bgengine::score_moves_ext(
+                    &board.inner, &dice, self.lookahead, self.candidates, &eval, ext_plies, ext_cands)
+            } else {
+                bgengine::score_moves_ext(
+                    &board.inner, &dice, self.lookahead, self.candidates, &self.nn, ext_plies, ext_cands)
             }
         })
     }
