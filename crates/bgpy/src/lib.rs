@@ -252,11 +252,6 @@ fn hce_move(board: &PyBoard, d1: u8, d2: u8) -> PyBoard {
 /// embeds the ONNX runtime) plus `td.onnx`, and needs neither PyTorch nor
 /// onnxruntime. It is also far faster than searching from Python — the whole
 /// search runs in Rust instead of crossing the FFI boundary per position.
-/// Default cap on extra plies a forced-pass chain may add to the search (the
-/// burned-in pass extension's explosion guard).
-#[cfg(feature = "onnx")]
-const PASS_EXT_MAX: u16 = 8;
-
 #[cfg(feature = "onnx")]
 #[pyclass]
 struct Neural {
@@ -266,6 +261,10 @@ struct Neural {
     /// Per-*remaining-depth* candidate limits (built from the root-inward
     /// `cand_schedule`); `None` = uniform `candidates` at every ply.
     schedule: Option<Vec<usize>>,
+    /// Pass-extension switch: 0 = OFF (plain search — the default), >0 enables it
+    /// with this many max extra plies per line. Off by default: at 2-ply it was
+    /// parity for ~2x cost, so it's opt-in tooling rather than on by default.
+    pass_ext: u16,
 }
 
 #[cfg(feature = "onnx")]
@@ -290,12 +289,13 @@ impl Neural {
     /// the best 6 moves at the root and 3 one ply deeper). Plies past the list's
     /// end fall back to full width. Applies to `search_dist` (the label path).
     #[new]
-    #[pyo3(signature = (onnx_path, lookahead = 0, candidates = 0, cand_schedule = None))]
+    #[pyo3(signature = (onnx_path, lookahead = 0, candidates = 0, cand_schedule = None, pass_ext = 0))]
     fn new(
         onnx_path: &str,
         lookahead: u8,
         candidates: usize,
         cand_schedule: Option<Vec<usize>>,
+        pass_ext: u16,
     ) -> PyResult<Self> {
         let nn = bgengine::eval::NnEval::from_path(onnx_path).map_err(PyValueError::new_err)?;
         // Re-index the root-inward schedule by *remaining depth* (how the search
@@ -310,7 +310,7 @@ impl Neural {
             }
             s
         });
-        Ok(Neural { nn, lookahead, candidates, schedule })
+        Ok(Neural { nn, lookahead, candidates, schedule, pass_ext })
     }
 
     /// Static (0-ply) net equity for the side to move.
@@ -380,17 +380,62 @@ impl Neural {
     fn scores(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8) -> Vec<f32> {
         py.allow_threads(|| {
             let dice = Dice::new(d1, d2);
-            // Pass extension is burned in: a forced dance doesn't consume a ply, so
-            // the opponent's reply is searched deeper (bounded by PASS_EXT_MAX). Safe
-            // (guarded, ~2x cost on pass-heavy positions), and slightly favourable in
-            // blocked/closed-out spots where the static eval is weakest.
+            let eval_cached = self.lookahead >= 2;
+            // `pass_ext > 0` opts into the pass extension; default (0) is plain search.
+            match (self.pass_ext > 0, eval_cached) {
+                (true, true) => {
+                    let eval = bgengine::eval::CachedEval::new(&self.nn);
+                    bgengine::score_moves_pass(
+                        &board.inner, &dice, self.lookahead, self.candidates, &eval, self.pass_ext)
+                }
+                (true, false) => bgengine::score_moves_pass(
+                    &board.inner, &dice, self.lookahead, self.candidates, &self.nn, self.pass_ext),
+                (false, true) => {
+                    let eval = bgengine::eval::CachedEval::new(&self.nn);
+                    bgengine::score_moves(&board.inner, &dice, self.lookahead, self.candidates, &eval)
+                }
+                (false, false) => bgengine::score_moves(
+                    &board.inner, &dice, self.lookahead, self.candidates, &self.nn),
+            }
+        })
+    }
+
+    /// Per-move equities using a gnubg-style move filter: keep the best `floor`
+    /// moves plus up to `extra` more within `threshold` equity of the best (capped
+    /// at floor+extra), per ply. `extra = 0` reproduces the fixed top-`floor` of
+    /// `scores`. No pass/singular extension — isolates the filter.
+    #[pyo3(signature = (board, d1, d2, floor = 1, extra = 4, threshold = 0.08))]
+    fn scores_filter(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8,
+                     floor: usize, extra: usize, threshold: f32) -> Vec<f32> {
+        py.allow_threads(|| {
+            let dice = Dice::new(d1, d2);
             if self.lookahead >= 2 {
                 let eval = bgengine::eval::CachedEval::new(&self.nn);
-                bgengine::score_moves_pass(
-                    &board.inner, &dice, self.lookahead, self.candidates, &eval, PASS_EXT_MAX)
+                bgengine::score_moves_filter(
+                    &board.inner, &dice, self.lookahead, floor, extra, threshold, &eval)
             } else {
-                bgengine::score_moves_pass(
-                    &board.inner, &dice, self.lookahead, self.candidates, &self.nn, PASS_EXT_MAX)
+                bgengine::score_moves_filter(
+                    &board.inner, &dice, self.lookahead, floor, extra, threshold, &self.nn)
+            }
+        })
+    }
+
+    /// Per-move equities with the pass extension AND the singular extension (a
+    /// forced single move also doesn't consume a ply). `max_singular` = singular
+    /// extensions per branch; `node_cap` = hard node budget (explosion guards).
+    /// `max_singular = 0` equals `scores` (pass-only).
+    #[pyo3(signature = (board, d1, d2, max_pass_ext = 8, max_singular = 2, node_cap = 2000000))]
+    fn scores_sing(&self, py: Python<'_>, board: &PyBoard, d1: u8, d2: u8,
+                   max_pass_ext: u16, max_singular: u8, node_cap: u64) -> Vec<f32> {
+        py.allow_threads(|| {
+            let dice = Dice::new(d1, d2);
+            if self.lookahead >= 2 {
+                let eval = bgengine::eval::CachedEval::new(&self.nn);
+                bgengine::score_moves_sing(&board.inner, &dice, self.lookahead,
+                    self.candidates, &eval, max_pass_ext, max_singular, node_cap)
+            } else {
+                bgengine::score_moves_sing(&board.inner, &dice, self.lookahead,
+                    self.candidates, &self.nn, max_pass_ext, max_singular, node_cap)
             }
         })
     }

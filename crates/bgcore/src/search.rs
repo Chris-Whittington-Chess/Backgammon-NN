@@ -248,6 +248,233 @@ pub fn score_moves_pass<E: Evaluator>(
     scores
 }
 
+// --- Singular extension -------------------------------------------------------
+//
+// Generalises the pass extension to a SINGULAR move (exactly one legal, non-pass
+// move — a forced play): also a non-decision, so it doesn't consume a ply. Unlike
+// a pass, a singular move changes the board, so the same-board dedup does NOT
+// apply and singular is far more common — hence extra guards: a per-branch cap
+// (`max_sing` extensions per root-to-leaf path) AND a hard node budget. Pass
+// extension is still applied throughout.
+
+/// `pv_pass` plus the singular extension. `sing_used` counts singular extensions
+/// on the current path; `nodes` counts visited nodes (both are explosion guards).
+#[allow(clippy::too_many_arguments)]
+fn pv_sing<E: Evaluator>(
+    board: &Board,
+    depth: u8,
+    abs_ply: u16,
+    abs_cap: u16,
+    sing_used: u8,
+    max_sing: u8,
+    nodes: &Cell<u64>,
+    node_cap: u64,
+    eval: &E,
+    candidates: usize,
+) -> f32 {
+    nodes.set(nodes.get() + 1);
+    match result(board) {
+        GameResult::MoverWins(p) => return p as f32,
+        GameResult::OppWins(p) => return -(p as f32),
+        GameResult::InProgress => {}
+    }
+    if depth == 0 || abs_ply >= abs_cap || nodes.get() >= node_cap {
+        return eval.evaluate(board).equity();
+    }
+
+    let mut total = 0.0f32;
+    let mut pass_value: Option<f32> = None;
+    for a in 1..=6u8 {
+        for c in a..=6u8 {
+            let weight = if a == c { 1.0 / 36.0 } else { 2.0 / 36.0 };
+            let mut moves = genmoves(board, &Dice::new(a, c));
+
+            // Pass (dance): non-decrement, deduped across dice.
+            if moves.len() == 1 && moves[0].result == *board {
+                let v = *pass_value.get_or_insert_with(|| {
+                    -pv_sing(&board.swap_perspective(), depth, abs_ply + 1, abs_cap,
+                             sing_used, max_sing, nodes, node_cap, eval, candidates)
+                });
+                total += weight * v;
+                continue;
+            }
+
+            // Singular: exactly one (real) forced move, with per-branch budget left.
+            if moves.len() == 1 && sing_used < max_sing {
+                let v = match result(&moves[0].result) {
+                    GameResult::MoverWins(p) => p as f32,
+                    _ => -pv_sing(&moves[0].result.swap_perspective(), depth, abs_ply + 1, abs_cap,
+                                  sing_used + 1, max_sing, nodes, node_cap, eval, candidates),
+                };
+                total += weight * v;
+                continue;
+            }
+
+            let vals = shallow_all(&moves, eval);
+            if depth == 1 {
+                total += weight * vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                continue;
+            }
+            if candidates > 0 && moves.len() > candidates {
+                let mut idx: Vec<usize> = (0..moves.len()).collect();
+                idx.sort_by(|&i, &j| vals[j].partial_cmp(&vals[i]).unwrap());
+                idx.truncate(candidates);
+                idx.sort_unstable();
+                let mut keep = idx.iter().map(|&i| moves[i].clone()).collect();
+                std::mem::swap(&mut moves, &mut keep);
+            }
+            let mut best = f32::NEG_INFINITY;
+            for m in &moves {
+                let v = match result(&m.result) {
+                    GameResult::MoverWins(p) => p as f32,
+                    _ => -pv_sing(&m.result.swap_perspective(), depth - 1, abs_ply + 1, abs_cap,
+                                  sing_used, max_sing, nodes, node_cap, eval, candidates),
+                };
+                if v > best {
+                    best = v;
+                }
+            }
+            total += weight * best;
+        }
+    }
+    total
+}
+
+/// Per-move equities with BOTH the pass extension and the singular extension.
+/// `max_sing` = singular extensions allowed per branch; `node_cap` = hard node
+/// budget (both guards). `max_sing = 0` reduces exactly to `score_moves_pass`.
+pub fn score_moves_sing<E: Evaluator>(
+    board: &Board,
+    dice: &Dice,
+    depth: u8,
+    candidates: usize,
+    eval: &E,
+    max_pass_ext: u16,
+    max_sing: u8,
+    node_cap: u64,
+) -> Vec<f32> {
+    let moves = genmoves(board, dice);
+    let mut scores = shallow_all(&moves, eval);
+    if depth == 0 {
+        return scores;
+    }
+    let abs_cap = depth as u16 + max_pass_ext + max_sing as u16;
+    let mut order: Vec<usize> = (0..moves.len()).collect();
+    if depth >= 2 && candidates > 0 && moves.len() > candidates {
+        order.sort_by(|&i, &j| scores[j].partial_cmp(&scores[i]).unwrap());
+        order.truncate(candidates);
+    }
+    for &i in &order {
+        scores[i] = match result(&moves[i].result) {
+            GameResult::MoverWins(p) => p as f32,
+            _ => {
+                let nodes = Cell::new(0u64);
+                -pv_sing(&moves[i].result.swap_perspective(), depth, 0, abs_cap,
+                         0, max_sing, &nodes, node_cap, eval, candidates)
+            }
+        };
+    }
+    scores
+}
+
+// --- gnubg-style move filter --------------------------------------------------
+//
+// Instead of a fixed top-N (`candidates`), keep the best `floor` moves ALWAYS,
+// plus up to `extra` more that are within `threshold` equity of the best — then
+// hard-cap at `floor + extra`. Adaptive width (searches more when several moves
+// are close, fewer when one dominates) but bounded. `extra == 0` reproduces a
+// fixed top-`floor`.
+
+/// Indices (in original order) of the moves to search deeper under the filter.
+fn filtered_moves(vals: &[f32], floor: usize, extra: usize, threshold: f32) -> Vec<usize> {
+    let n = vals.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&i, &j| vals[j].partial_cmp(&vals[i]).unwrap());
+    let best = vals[idx[0]];
+    let cap = (floor + extra).min(n);
+    let mut keep = floor.clamp(1, n);
+    while keep < cap && vals[idx[keep]] >= best - threshold {
+        keep += 1;
+    }
+    idx.truncate(keep);
+    idx.sort_unstable(); // restore original order (matches pv/pvd)
+    idx
+}
+
+/// `pv` with the gnubg-style move filter in place of the fixed `candidates`.
+fn pv_filter<E: Evaluator>(
+    board: &Board,
+    depth: u8,
+    eval: &E,
+    floor: usize,
+    extra: usize,
+    threshold: f32,
+) -> f32 {
+    match result(board) {
+        GameResult::MoverWins(p) => return p as f32,
+        GameResult::OppWins(p) => return -(p as f32),
+        GameResult::InProgress => {}
+    }
+    if depth == 0 {
+        return eval.evaluate(board).equity();
+    }
+    let mut total = 0.0f32;
+    for a in 1..=6u8 {
+        for c in a..=6u8 {
+            let weight = if a == c { 1.0 / 36.0 } else { 2.0 / 36.0 };
+            let moves = genmoves(board, &Dice::new(a, c));
+            let vals = shallow_all(&moves, eval);
+            if depth == 1 {
+                total += weight * vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                continue;
+            }
+            let mut best = f32::NEG_INFINITY;
+            for &i in &filtered_moves(&vals, floor, extra, threshold) {
+                let v = match result(&moves[i].result) {
+                    GameResult::MoverWins(p) => p as f32,
+                    _ => -pv_filter(&moves[i].result.swap_perspective(), depth - 1, eval,
+                                    floor, extra, threshold),
+                };
+                if v > best {
+                    best = v;
+                }
+            }
+            total += weight * best;
+        }
+    }
+    total
+}
+
+/// Per-move equities using the gnubg-style filter (root + deep). `extra = 0`
+/// reproduces the fixed top-`floor` behaviour of `score_moves`.
+pub fn score_moves_filter<E: Evaluator>(
+    board: &Board,
+    dice: &Dice,
+    depth: u8,
+    floor: usize,
+    extra: usize,
+    threshold: f32,
+    eval: &E,
+) -> Vec<f32> {
+    let moves = genmoves(board, dice);
+    let mut scores = shallow_all(&moves, eval);
+    if depth == 0 {
+        return scores;
+    }
+    let order: Vec<usize> = if depth >= 2 {
+        filtered_moves(&scores, floor, extra, threshold)
+    } else {
+        (0..moves.len()).collect()
+    };
+    for &i in &order {
+        scores[i] = match result(&moves[i].result) {
+            GameResult::MoverWins(p) => p as f32,
+            _ => -pv_filter(&moves[i].result.swap_perspective(), depth, eval, floor, extra, threshold),
+        };
+    }
+    scores
+}
+
 // --- Distribution-returning search --------------------------------------------
 //
 // `pv` folds each searched position to a scalar equity. For distillation labels we

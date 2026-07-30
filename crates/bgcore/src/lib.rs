@@ -38,5 +38,5 @@ pub use rollout::{
 };
 pub use search::{
     position_dist, position_dist_cands, position_dist_ext, position_value, score_moves,
-    score_moves_ext, score_moves_pass, Cands, SearchEngine,
+    score_moves_ext, score_moves_filter, score_moves_pass, score_moves_sing, Cands, SearchEngine,
 };
