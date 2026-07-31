@@ -34,9 +34,10 @@ MODELS = Path(__file__).resolve().parent.parent / "models"
 _RO = None
 
 
-def _init(net_path, trials, truncate, candidates, seed, threads):
+def _init(net_path, trials, truncate, candidates, seed, threads, playout_plies, playout_cands):
     global _RO
-    _RO = bgcore.Rollouts(net_path, trials, truncate, candidates, seed, 0, threads)
+    _RO = bgcore.Rollouts(net_path, trials, truncate, candidates, seed, 0, threads,
+                          playout_plies, playout_cands)
 
 
 def _label_chunk(chunk):
@@ -67,7 +68,13 @@ def main():
     ap.add_argument("--trials", type=int, default=300)
     ap.add_argument("--truncate", type=int, default=0, help="0 = roll to the game end (truth)")
     ap.add_argument("--candidates", type=int, default=0, help="rollout move filter; 0 = full width")
-    ap.add_argument("--limit", type=int, default=0, help="relabel the FIRST N positions (contiguous)")
+    ap.add_argument("--playout-plies", type=int, default=0,
+                    help="playout policy strength: 0 = greedy 0-ply (cheap), 1 = 1-ply search (stronger play, ~74x slower)")
+    ap.add_argument("--playout-cands", type=int, default=3,
+                    help="with --playout-plies 1, 1-ply-search only the top-K moves per ply (explosion guard)")
+    ap.add_argument("--start", type=int, default=0,
+                    help="relabel the window [start : start+limit] of the source (for splitting a run across machines)")
+    ap.add_argument("--limit", type=int, default=0, help="window length from --start; 0 = to the end")
     ap.add_argument("--save-every", type=int, default=5000)
     ap.add_argument("--seed", type=int, default=0x5EED)
     ap.add_argument("--workers", type=int, default=15, help="position-parallel worker processes")
@@ -81,13 +88,17 @@ def main():
     pos_ids = src["pos_ids"]
     outcomes = src["outcomes"].astype(np.int8)
     buckets = src["buckets"].astype(np.int8)
-    if args.limit and args.limit < len(pos_ids):
-        pos_ids, outcomes, buckets = pos_ids[:args.limit], outcomes[:args.limit], buckets[:args.limit]
+    # Window [start : start+limit] so two machines can each label a disjoint slice
+    # (each writes its own --out; merge the outputs afterwards).
+    lo = args.start
+    hi = len(pos_ids) if not args.limit else min(len(pos_ids), lo + args.limit)
+    pos_ids, outcomes, buckets = pos_ids[lo:hi], outcomes[lo:hi], buckets[lo:hi]
     n = len(pos_ids)
 
     out = MODELS / args.out
     kind = "full games (truth)" if args.truncate == 0 else f"{args.truncate}-ply trunc"
-    print(f"rollout-relabelling {n} positions from {args.source} | {args.trials} trials, {kind} "
+    policy = f"{args.playout_plies}-ply playout" + (f" (top-{args.playout_cands})" if args.playout_plies else "")
+    print(f"rollout-relabelling {n} positions [{lo}:{hi}] from {args.source} | {args.trials} trials, {kind}, {policy} "
           f"| {args.workers} workers x {args.threads} threads -> {args.out}", flush=True)
 
     probs = np.zeros((n, 6), dtype=np.float32)
@@ -107,7 +118,7 @@ def main():
     net_path = str(MODELS / args.net)
     with mp.Pool(args.workers, initializer=_init,
                  initargs=(net_path, args.trials, args.truncate, args.candidates,
-                           args.seed, args.threads)) as pool:
+                           args.seed, args.threads, args.playout_plies, args.playout_cands)) as pool:
         for res in pool.imap(_label_chunk, chunks):  # imap preserves order for the prefix checkpoint
             probs[done:done + len(res)] = res
             done += len(res)
@@ -115,7 +126,8 @@ def main():
                 last_save = done
                 _atomic_savez(out, pos_ids=pos_ids[:done], probs=probs[:done],
                               outcomes=outcomes[:done], buckets=buckets[:done],
-                              trials=args.trials, truncate=args.truncate, net=args.net)
+                              trials=args.trials, truncate=args.truncate, net=args.net,
+                              playout_plies=args.playout_plies, playout_cands=args.playout_cands)
                 rate = max(done - start, 1) / max(time.time() - t0, 1e-9)
                 eta_h = (n - done) / max(rate, 1e-9) / 3600
                 print(f"  {done:7d}/{n} | {rate:5.1f} pos/sec | ETA {eta_h:4.1f}h | saved", flush=True)

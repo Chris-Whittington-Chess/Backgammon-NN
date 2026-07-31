@@ -604,7 +604,8 @@ struct Rollouts {
 #[pymethods]
 impl Rollouts {
     #[new]
-    #[pyo3(signature = (onnx_path, trials = 180, truncate_plies = 11, candidates = 6, seed = 0x5EED, movetime_ms = 0, threads = 0))]
+    #[pyo3(signature = (onnx_path, trials = 180, truncate_plies = 11, candidates = 6, seed = 0x5EED, movetime_ms = 0, threads = 0, playout_plies = 0, playout_cands = 3))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         onnx_path: &str,
         trials: usize,
@@ -613,11 +614,14 @@ impl Rollouts {
         seed: u64,
         movetime_ms: u64,
         threads: usize,
+        playout_plies: usize,
+        playout_cands: usize,
     ) -> PyResult<Self> {
         let nn = bgengine::eval::NnEval::from_path(onnx_path).map_err(PyValueError::new_err)?;
         let cfg = bgengine::RolloutConfig {
             trials, truncate_plies, candidates, seed, movetime_ms, threads,
             net_race: false,   // one net for all positions -> min-pip race playout
+            playout_plies, playout_cands,
         };
         Ok(Rollouts { eval: RollEval::Single(nn), cfg, pool: bgengine::build_pool(threads) })
     }
@@ -642,6 +646,7 @@ impl Rollouts {
         let cfg = bgengine::RolloutConfig {
             trials, truncate_plies, candidates, seed, movetime_ms, threads,
             net_race: true,
+            playout_plies: 0, playout_cands: 3,
         };
         Ok(Rollouts { eval: RollEval::Phase(pe), cfg, pool: bgengine::build_pool(threads) })
     }

@@ -678,7 +678,7 @@ fn pvd_ext<E: Evaluator>(
                             for _ in 0..trials {
                                 let mut rng = Rng::new(seed);
                                 acc = add5(acc, crate::rollout::rollout_once_dist(
-                                    &start, eval, ext_plies as usize, false, &mut rng));
+                                    &start, eval, ext_plies as usize, false, 0, 0, &mut rng));
                                 seed = seed.wrapping_mul(0x2545_F491_4F6C_DD1D).wrapping_add(1);
                             }
                             flip5(scale5(1.0 / trials as f32, acc))

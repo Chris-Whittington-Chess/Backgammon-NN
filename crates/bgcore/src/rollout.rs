@@ -44,6 +44,18 @@ pub struct RolloutConfig {
     /// race half is trained on races); with a plain contact net, leave `false` and
     /// keep the min-pip fallback. Default `false`.
     pub net_race: bool,
+    /// Playout policy strength: `0` picks each playout move by static (0-ply) eval
+    /// (the classic, cheap policy); `1` picks it by a **1-ply search** (score the
+    /// move by the opponent's best dice-averaged reply). A 1-ply playout plays
+    /// materially stronger — the "truth" it rolls out to is truth-under-*stronger*-
+    /// play — at ~20-80x the per-ply cost (see `playout_cands`). Only the
+    /// per-trial path (`rollout_dist`/`rollout_equity`) honours this; the batched
+    /// wave engine asserts 0-ply.
+    pub playout_plies: usize,
+    /// When `playout_plies >= 1`, pre-rank the legal moves by 0-ply and 1-ply-search
+    /// only the best this-many (the rest can't be the move; this is the mandatory
+    /// explosion guard — full width is ~21*M matmuls per ply). `0` = full width.
+    pub playout_cands: usize,
 }
 
 impl Default for RolloutConfig {
@@ -56,6 +68,8 @@ impl Default for RolloutConfig {
             movetime_ms: 0,
             threads: 0,
             net_race: false,
+            playout_plies: 0,
+            playout_cands: 3,
         }
     }
 }
@@ -166,13 +180,89 @@ fn pick_playout_boards<E: Evaluator>(
     argmax(&shallow_scores_boards(children, eval))
 }
 
+/// Choose the playout move by a **1-ply search**, returning its index into
+/// `children`. Races still play min-pip (the net is a poor race guide, and a
+/// 1-ply search over it would only amplify that). Otherwise: pre-rank the moves
+/// 0-ply, keep the best `cands` (full width if `cands == 0`), and pick the one
+/// whose resulting position has the best 1-ply value — i.e. the highest equity
+/// after the opponent's *dice-averaged best reply*. That look-ahead is exactly
+/// how the engine plays at lookahead 1, so the playout plays correspondingly
+/// stronger. Cost: `cands` (or M) `position_value(_, 1, _)` calls, each a 21-roll
+/// chance node — the reason `cands` must be small.
+fn pick_playout_1ply<E: Evaluator>(
+    b: &Board,
+    children: &[Board],
+    eval: &E,
+    net_race: bool,
+    cands: usize,
+) -> usize {
+    if b.no_contact() && !net_race {
+        let mut best_i = 0;
+        let mut best = i32::MAX;
+        for (i, c) in children.iter().enumerate() {
+            let pip = c.pip_count(crate::board::MOVER);
+            if pip < best {
+                best = pip;
+                best_i = i;
+            }
+        }
+        return best_i;
+    }
+
+    // 0-ply pre-rank, then 1-ply-search only the top `cands` (the rest cannot be
+    // the best move at 1-ply either — this prunes the ~21*M explosion to ~21*cands).
+    let shallow = shallow_scores_boards(children, eval);
+    let mut order: Vec<usize> = (0..children.len()).collect();
+    if cands > 0 && children.len() > cands {
+        order.sort_by(|&i, &j| shallow[j].partial_cmp(&shallow[i]).unwrap());
+        order.truncate(cands);
+    }
+
+    let mut best_i = order[0];
+    let mut best = f32::NEG_INFINITY;
+    for &i in &order {
+        let c = &children[i];
+        // A move that wins outright scores its points; else its 1-ply value is the
+        // negated value of the opponent-to-move position searched one ply.
+        let v = match result(c) {
+            GameResult::MoverWins(p) => p as f32,
+            _ => -crate::search::position_value(&c.swap_perspective(), 1, eval),
+        };
+        if v > best {
+            best = v;
+            best_i = i;
+        }
+    }
+    best_i
+}
+
+/// Playout move index: 1-ply search when `playout_plies >= 1`, else 0-ply greedy.
+#[inline]
+fn pick_playout_step<E: Evaluator>(
+    b: &Board,
+    children: &[Board],
+    eval: &E,
+    net_race: bool,
+    playout_plies: usize,
+    playout_cands: usize,
+) -> usize {
+    if playout_plies >= 1 {
+        pick_playout_1ply(b, children, eval, net_race, playout_cands)
+    } else {
+        pick_playout_boards(b, children, eval, net_race)
+    }
+}
+
 /// One truncated playout from `board`, returning equity **from the perspective
-/// of `board`'s side to move**. Uses a 0-ply policy (greedy on `eval`).
+/// of `board`'s side to move**. `playout_plies` selects the policy (0 = greedy
+/// 0-ply, 1 = 1-ply search; see [`RolloutConfig::playout_plies`]).
 fn rollout_once<E: Evaluator>(
     board: &Board,
     eval: &E,
     truncate: usize,
     net_race: bool,
+    playout_plies: usize,
+    playout_cands: usize,
     rng: &mut Rng,
 ) -> f32 {
     let mut b = *board;
@@ -191,7 +281,8 @@ fn rollout_once<E: Evaluator>(
         }
 
         genmoves_playout(&b, &rng.roll(), &mut children);
-        let chosen = children[pick_playout_boards(&b, &children, eval, net_race)];
+        let chosen =
+            children[pick_playout_step(&b, &children, eval, net_race, playout_plies, playout_cands)];
         if let GameResult::MoverWins(p) = result(&chosen) {
             return sign * p as f32; // the side that just moved won
         }
@@ -214,7 +305,8 @@ pub fn rollout_equity<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &Rollou
         .into_par_iter()
         .map(|t| {
             let mut rng = Rng::new(cfg.seed.wrapping_add(t as u64 + 1).wrapping_mul(GOLDEN));
-            rollout_once(board, eval, cfg.truncate_plies, cfg.net_race, &mut rng)
+            rollout_once(board, eval, cfg.truncate_plies, cfg.net_race,
+                         cfg.playout_plies, cfg.playout_cands, &mut rng)
         })
         .sum();
     sum / cfg.trials as f32
@@ -233,7 +325,8 @@ fn rollout_timed<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutConf
             .into_par_iter()
             .map(|t| {
                 let mut rng = Rng::new(cfg.seed.wrapping_add(base + t + 1).wrapping_mul(GOLDEN));
-                rollout_once(board, eval, cfg.truncate_plies, cfg.net_race, &mut rng)
+                rollout_once(board, eval, cfg.truncate_plies, cfg.net_race,
+                             cfg.playout_plies, cfg.playout_cands, &mut rng)
             })
             .sum();
         total += s;
@@ -316,11 +409,15 @@ fn orient(v: [f32; 5], plies: usize) -> [f32; 5] {
 
 /// One playout, returning the outcome distribution `[win, win_g, win_bg,
 /// lose_g, lose_bg]` from the perspective of `board`'s side to move.
+/// `playout_plies` selects the policy (0 = greedy 0-ply, 1 = 1-ply search).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rollout_once_dist<E: Evaluator>(
     board: &Board,
     eval: &E,
     truncate: usize,
     net_race: bool,
+    playout_plies: usize,
+    playout_cands: usize,
     rng: &mut Rng,
 ) -> [f32; 5] {
     let mut b = *board;
@@ -337,7 +434,8 @@ pub(crate) fn rollout_once_dist<E: Evaluator>(
             return orient([v.win, v.win_g, v.win_bg, v.lose_g, v.lose_bg], plies);
         }
         genmoves_playout(&b, &rng.roll(), &mut children);
-        let chosen = children[pick_playout_boards(&b, &children, eval, net_race)];
+        let chosen =
+            children[pick_playout_step(&b, &children, eval, net_race, playout_plies, playout_cands)];
         if let GameResult::MoverWins(p) = result(&chosen) {
             return orient(win_vec(p), plies);
         }
@@ -367,7 +465,8 @@ pub fn rollout_dist<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutC
                 .into_par_iter()
                 .map(|t| {
                     let mut rng = Rng::new(cfg.seed.wrapping_add(base + t + 1).wrapping_mul(GOLDEN));
-                    rollout_once_dist(board, eval, cfg.truncate_plies, cfg.net_race, &mut rng)
+                    rollout_once_dist(board, eval, cfg.truncate_plies, cfg.net_race,
+                                      cfg.playout_plies, cfg.playout_cands, &mut rng)
                 })
                 .reduce(|| [0.0; 5], add5);
             total = add5(total, s);
@@ -387,7 +486,8 @@ pub fn rollout_dist<E: Evaluator + Sync>(board: &Board, eval: &E, cfg: &RolloutC
         .into_par_iter()
         .map(|t| {
             let mut rng = Rng::new(cfg.seed.wrapping_add(t as u64 + 1).wrapping_mul(GOLDEN));
-            rollout_once_dist(board, eval, cfg.truncate_plies, cfg.net_race, &mut rng)
+            rollout_once_dist(board, eval, cfg.truncate_plies, cfg.net_race,
+                              cfg.playout_plies, cfg.playout_cands, &mut rng)
         })
         .reduce(|| [0.0; 5], add5);
     mean(sums, cfg.trials as f32)
@@ -454,6 +554,13 @@ pub fn rollout_dist_wave<E: Evaluator + Sync>(
     cfg: &RolloutConfig,
     wave_boards: usize,
 ) -> Vec<[f32; 5]> {
+    // The wave engine coalesces one 0-ply move-selection batch per ply across all
+    // trials; a 1-ply playout needs a per-move sub-search that breaks that lockstep.
+    // Rather than silently return 0-ply labels, fall back to the per-trial path
+    // (which honours playout_plies) for each board.
+    if cfg.playout_plies >= 1 {
+        return boards.par_iter().map(|b| rollout_dist(b, eval, cfg)).collect();
+    }
     let chunk = if wave_boards == 0 { 1 } else { wave_boards };
     let parts: Vec<Vec<[f32; 5]>> =
         boards.par_chunks(chunk).map(|group| wave_chunk(group, eval, cfg)).collect();
@@ -790,6 +897,21 @@ mod tests {
                 "wave (wave_boards={wb}) diverged from per-trial rollout_dist by {max_diff}"
             );
         }
+    }
+
+    #[test]
+    fn one_ply_playout_runs_and_stays_coherent() {
+        // The 1-ply-search playout policy must produce a valid, nested outcome
+        // distribution, and an even opening should still sit near 50%.
+        let cfg = RolloutConfig {
+            trials: 40, truncate_plies: 0, candidates: 0, seed: 9,
+            playout_plies: 1, playout_cands: 3, ..Default::default()
+        };
+        let d = rollout_dist(&Board::starting_position(), &HceEval::new(), &cfg);
+        assert!(d.iter().all(|&x| (0.0..=1.0).contains(&x)), "not a distribution {d:?}");
+        assert!(d[0] >= d[1] - 1e-6 && d[1] >= d[2] - 1e-6, "win nesting {d:?}");
+        assert!(d[3] >= d[4] - 1e-6, "lose nesting {d:?}");
+        assert!((0.3..0.7).contains(&d[0]), "opening win prob {}", d[0]);
     }
 
     #[test]
