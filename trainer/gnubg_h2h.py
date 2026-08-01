@@ -1,7 +1,7 @@
-"""Direct 0-ply head-to-head: our champion vs gnubg (task #5).
+"""Direct head-to-head: our champion vs gnubg (task #5).
 
-Unbiased — decided by actual game outcomes, not equity estimates. Both engines
-play their own 0-ply evaluation; we orchestrate. On gnubg's turn, OUR engine
+Unbiased — decided by actual game outcomes, not equity estimates. Our net plays
+its own 0-ply evaluation; gnubg plays at `--plies` (default 0). On gnubg's turn, OUR engine
 generates the legal moves (wildbg-validated) and gnubg picks its best by evaluating
 each resulting position (`set board`/`eval`, bridged by GNU Position ID) — no
 move-notation parsing. Dice are mirrored (each roll sequence played twice, seats
@@ -33,10 +33,36 @@ STATIC = re.compile(
     r"static:\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+([+-][\d.]+)")
 
 
-class GnubgEngine:
-    """Persistent gnubg-cli process that picks the 0-ply best move among children."""
+# gnubg's `eval` ALWAYS computes the full table (static / 1 ply / 2 ply) and ends
+# with a `N-ply cubeless equity` summary. `set evaluation chequerplay eval plies N`
+# does NOT change it — verified: N=0, 2 and 3 give byte-identical output. So gnubg's
+# playing strength here is decided purely by WHICH ROW WE READ, and 2 ply is the
+# deepest available.
+DEEP = re.compile(r"\d+-ply cubeless equity\s+([+-][\d.]+)")
+ONE_PLY = re.compile(r"^\s*1 ply:" + r"\s+[\d.]+" * 5 + r"\s+([+-][\d.]+)")
 
-    def __init__(self):
+
+def equity_re(plies: int):
+    """The regex selecting how strong gnubg plays: 0 = its static eval, 1 = its
+    1-ply row, 2+ = its deepest (2-ply) evaluation.
+
+    The deep case reads the summary line rather than the ` 2 ply:` row on purpose.
+    Positions gnubg answers from its bearoff databases print `static:` but no
+    deeper rows, so counting ` 2 ply:` rows silently comes up short — the read then
+    blocks until the 15s timeout and the worker DISCARDS the whole game. The
+    summary line is emitted exactly once per eval, whatever the position.
+    """
+    if plies <= 0:
+        return STATIC
+    return ONE_PLY if plies == 1 else DEEP
+
+
+class GnubgEngine:
+    """Persistent gnubg-cli process picking the best move among children at `plies`."""
+
+    def __init__(self, plies: int = 0):
+        self.plies = plies
+        self.re = equity_re(plies)
         self.p = subprocess.Popen(
             [GNUBG, "-t", "-q"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, bufsize=1)
@@ -44,7 +70,7 @@ class GnubgEngine:
         # on a position, emitting no `static:` line, which would block forever.
         self.q = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
-        self.p.stdin.write("set evaluation chequerplay eval plies 0\nnew game\n")
+        self.p.stdin.write(f"set evaluation chequerplay eval plies {plies}\nnew game\n")
         self.p.stdin.flush()
 
     def _pump(self):
@@ -74,7 +100,7 @@ class GnubgEngine:
                 raise RuntimeError("gnubg eval timed out")
             if line == "":
                 raise RuntimeError("gnubg process closed unexpectedly")
-            m = STATIC.search(line)
+            m = self.re.search(line)
             if m:
                 eqs.append(float(m.group(1)))
         return min(range(len(eqs)), key=lambda i: eqs[i])  # lowest opp equity
@@ -123,21 +149,24 @@ def main():
     ap.add_argument("--games", type=int, default=200)
     ap.add_argument("--workers", type=int, default=14,
                     help="parallel games (each = one gnubg process on its own core)")
+    ap.add_argument("--plies", type=int, default=0,
+                    help="gnubg's search depth (0 = static). Our net always plays 0-ply.")
     args = ap.parse_args()
 
     net = bgcore.Neural(str(MODELS / args.net), 0, 0)  # Sync: shared across threads
-    print(f"our net {args.net} vs gnubg, 0-ply, {args.games} games, mirrored dice, "
-          f"{args.workers} parallel workers\n", flush=True)
+    print(f"our net {args.net} (0-ply) vs gnubg {args.plies}-ply, {args.games} games, "
+          f"mirrored dice, {args.workers} parallel workers\n", flush=True)
 
     jobs = queue.Queue()
     for g in range(args.games):
         jobs.put(g)
     results = []
+    skipped = []          # games gnubg hung/desynced on: MUST be reported, not hidden
     lock = threading.Lock()
     t0 = time.time()
 
     def worker():
-        gnu = GnubgEngine()
+        gnu = GnubgEngine(args.plies)
         try:
             while True:
                 try:
@@ -152,7 +181,9 @@ def main():
                         gnu.close()
                     except Exception:
                         pass
-                    gnu = GnubgEngine()
+                    gnu = GnubgEngine(args.plies)
+                    with lock:
+                        skipped.append(g)
                     continue
                 with lock:
                     results.append(p)
@@ -174,15 +205,19 @@ def main():
         t.join()
 
     n = len(results)
+    if skipped:
+        print(f"\nWARNING: {len(skipped)} of {args.games} games DISCARDED (gnubg hung/"
+              f"desynced). Survivors are not a random subset — treat the result as "
+              f"unreliable until this is zero.")
     wins = sum(1 for p in results if p > 0)
     pts = sum(results)
     wr = wins / n
     z = (wr - 0.5) / math.sqrt(0.25 / n)
-    print(f"\nOUR net wins {100*wr:.1f}%  (z = {z:+.2f})   PPG {pts/n:+.3f}  vs gnubg 0-ply "
+    print(f"\nOUR net wins {100*wr:.1f}%  (z = {z:+.2f})   PPG {pts/n:+.3f}  vs gnubg {args.plies}-ply "
           f"| {n} games in {time.time()-t0:.0f}s")
     verdict = ("WE ARE STRONGER" if z > 1.96 else
                "GNUBG STRONGER" if z < -1.96 else "TOO CLOSE TO CALL")
-    print(f"=> {verdict} at 0-ply")
+    print(f"=> {verdict} vs gnubg {args.plies}-ply")
 
 
 if __name__ == "__main__":

@@ -81,6 +81,13 @@ def main():
     ap.add_argument("--bench-every", type=int, default=5)
     ap.add_argument("--bench-games", type=int, default=400)
     ap.add_argument("--champion", default=None)
+    ap.add_argument("--init", default=None,
+                    help="warm-start from this bucketed checkpoint under models/ instead of "
+                         "random init. Training from scratch on a label set this size cannot "
+                         "reach a champion built from millions of self-play games, so a "
+                         "teacher A/B is only meaningful fine-tuning FROM that champion. "
+                         "Pair with a low --lr (~1e-4): at 1e-3 the first epochs wash the "
+                         "inherited weights out and it is a fresh net again.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="td_rollout.pt")
     args = ap.parse_args()
@@ -103,6 +110,19 @@ def main():
           f"{np.bincount(buckets, minlength=N_HEADS).tolist()}")
 
     net = ValueNetBucketed(hidden, args.act, N_HEADS)
+    if args.init:
+        ck = torch.load(MODELS / args.init, map_location="cpu")
+        # Trust the checkpoint's shape over the flags: silently warm-starting a
+        # different architecture would train something other than what was asked for.
+        if (ck.get("hidden") != hidden or ck.get("act", "relu") != args.act
+                or not ck.get("bucketed") or ck.get("n_buckets") != N_HEADS):
+            raise SystemExit(
+                f"--init {args.init} is hidden={ck.get('hidden')} act={ck.get('act')} "
+                f"bucketed={ck.get('bucketed')} n_buckets={ck.get('n_buckets')}, but you asked "
+                f"for hidden={hidden} act={args.act} bucketed=True n_buckets={N_HEADS}")
+        net.load_state_dict(ck["model"])
+        print(f"warm-started from {args.init} (iter {ck.get('iter')}) — fine-tuning it "
+              f"toward the new labels, not training from scratch")
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     champ = bucketed_champion_policy(args.champion) if args.champion else None
 
