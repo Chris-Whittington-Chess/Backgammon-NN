@@ -28,7 +28,10 @@ import numpy as np
 
 import bgcore
 
-GNUBG = r"C:/Users/chris/AppData/Local/gnubg/gnubg-cli.exe"
+import os
+# Path to gnubg-cli.exe. Override per-machine with the GNUBG_CLI env var so this
+# doesn't have to be edited on each box (e.g. box B installs gnubg elsewhere).
+GNUBG = os.environ.get("GNUBG_CLI", r"C:/Users/chris/AppData/Local/gnubg/gnubg-cli.exe")
 MODELS = Path(__file__).resolve().parent.parent / "models"
 STATIC = re.compile(
     r"static:\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+([+-][\d.]+)")
