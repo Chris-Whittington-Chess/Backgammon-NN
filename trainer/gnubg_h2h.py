@@ -1,7 +1,8 @@
 """Direct head-to-head: our champion vs gnubg (task #5).
 
 Unbiased — decided by actual game outcomes, not equity estimates. Our net plays
-its own 0-ply evaluation; gnubg plays at `--plies` (default 0). On gnubg's turn, OUR engine
+at `--our-ply` (default 0 = static eval), gnubg at `--plies` (default 0); set them
+equal for a like-for-like comparison. On gnubg's turn, OUR engine
 generates the legal moves (wildbg-validated) and gnubg picks its best by evaluating
 each resulting position (`set board`/`eval`, bridged by GNU Position ID) — no
 move-notation parsing. Dice are mirrored (each roll sequence played twice, seats
@@ -120,7 +121,20 @@ def our_best(net, children):
     return max(range(len(children)), key=lambda i: eqs[i])
 
 
-def play(net, gnu, seed, a_is_ours):
+def our_best_searched(net, board, d1, d2):
+    """Our move when searching (`--our-ply >= 1`): argmax of the per-move equities
+    the search returns, aligned with genmoves order.
+
+    This is deliberately `scores`, not the Rust `SearchEngine::choose`: the app's
+    NativeNeuralEngine also picks by sorting `scores`, so this measures what the
+    shipped engine actually plays. The two can differ — a pruned move keeps its
+    static value in `scores`, which can top a searched move's deep value.
+    """
+    eqs = net.scores(board, d1, d2)
+    return max(range(len(eqs)), key=lambda i: eqs[i])
+
+
+def play(net, gnu, seed, a_is_ours, our_ply=0):
     """One game; returns points to OUR engine (+win / -loss). Dice fixed by seed."""
     rng = random.Random(seed)
     board = bgcore.Board.starting()
@@ -128,7 +142,11 @@ def play(net, gnu, seed, a_is_ours):
     for _ in range(200):
         d1, d2 = rng.randint(1, 6), rng.randint(1, 6)
         children = bgcore.legal_moves(board, d1, d2)
-        i = our_best(net, children) if ours_to_move else gnu.best_child(children)
+        if ours_to_move:
+            i = (our_best_searched(net, board, d1, d2) if our_ply
+                 else our_best(net, children))
+        else:
+            i = gnu.best_child(children)
         chosen = children[i]
         pts = chosen.winner_points()
         if pts is not None and pts > 0:
@@ -150,7 +168,14 @@ def main():
     ap.add_argument("--workers", type=int, default=14,
                     help="parallel games (each = one gnubg process on its own core)")
     ap.add_argument("--plies", type=int, default=0,
-                    help="gnubg's search depth (0 = static). Our net always plays 0-ply.")
+                    help="gnubg's search depth (0 = static)")
+    ap.add_argument("--our-ply", type=int, default=0,
+                    help="OUR net's search depth (0 = static eval, the historic default). "
+                         "Set equal to --plies for an equal-depth comparison.")
+    ap.add_argument("--our-candidates", type=int, default=4,
+                    help="candidate filter for our 2-ply+ search; 0 = full width. "
+                         "4 matches NativeNeuralEngine.CANDIDATES, i.e. what the app plays. "
+                         "Ignored below 2 ply, which is full width anyway.")
     args = ap.parse_args()
 
     net = bgcore.Neural(str(MODELS / args.net), 0, 0)  # Sync: shared across threads
@@ -174,7 +199,7 @@ def main():
                 except queue.Empty:
                     break
                 try:
-                    p = play(net, gnu, 1000 + g // 2, g % 2 == 0)  # mirrored dice
+                    p = play(net, gnu, 1000 + g // 2, g % 2 == 0, args.our_ply)  # mirrored dice
                 except Exception:
                     # gnubg hung/desynced on this game: restart it and skip.
                     try:
