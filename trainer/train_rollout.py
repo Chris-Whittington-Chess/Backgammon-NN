@@ -58,7 +58,14 @@ def load_dataset(path, limit=0, limit_seed=0):
     if limit and limit < len(pos_ids):
         sel = np.random.default_rng(limit_seed).choice(len(pos_ids), size=limit, replace=False)
         pos_ids, soft, outcomes, buckets = pos_ids[sel], soft[sel], outcomes[sel], buckets[sel]
-    feats = np.stack([bgcore.Board.from_id(str(p)).features() for p in pos_ids]).astype(np.float32)
+    # Fill a preallocated array rather than np.stack over a list comprehension.
+    # Each features() call returns a Python list of 198 BOXED floats, so building
+    # the whole list first costs ~10x the array it produces: measured 1.61 GB per
+    # 200k positions, i.e. 182 GB at 22.5M against 128 GB of RAM (the 17.5M run
+    # only survived by paging). Preallocating holds peak at the array itself.
+    feats = np.empty((len(pos_ids), bgcore.NUM_INPUTS), dtype=np.float32)
+    for i, p in enumerate(pos_ids):
+        feats[i] = bgcore.Board.from_id(str(p)).features()
     hard = np.array([CLASS_OF[int(o)] for o in outcomes], dtype=np.int64)
     return feats, soft, hard, buckets
 

@@ -29,7 +29,13 @@ def main():
         pid.append(d["pos_ids"]); pr.append(d["probs"])
         oc.append(d["outcomes"]); bk.append(d["buckets"])
         if "net" in d:
-            net = str(d["net"])
+            # A merge of a merge: an earlier run stored net=None, which numpy
+            # saved as an OBJECT array, and reading one needs allow_pickle. Skip
+            # it rather than fail the whole merge over a provenance string.
+            try:
+                net = str(d["net"])
+            except ValueError:
+                pass
         print(f"  {f}: {len(d['pos_ids'])} positions")
     pid = np.concatenate(pid); pr = np.concatenate(pr)
     oc = np.concatenate(oc); bk = np.concatenate(bk)
@@ -42,9 +48,11 @@ def main():
         print(f"  dedup: {before} -> {len(pid)} unique positions")
 
     out = MODELS / args.out
+    # Never write None: numpy turns it into an object array that later loads
+    # cannot read without allow_pickle, which breaks merging a merged file.
     np.savez_compressed(out, pos_ids=pid, probs=pr.astype(np.float32),
                         outcomes=oc.astype(np.int8), buckets=bk.astype(np.int8),
-                        trials=0, truncate=1, net=net)
+                        trials=0, truncate=1, net=net if net is not None else "")
     pop = np.bincount(bk.astype(int), minlength=12)
     print(f"merged {len(args.inputs)} files -> {out} | {len(pid)} positions")
     print(f"per-bucket population: {pop.tolist()}")

@@ -121,6 +121,63 @@ class GnubgLabeller:
         return out
 
 
+class LabelSink:
+    """Collects gnubg evaluations that other runs would otherwise discard.
+
+    `gnubg_h2h` and `gnubg_bench` make gnubg evaluate every legal child at 2 ply
+    to pick a move, then keep one equity per child and drop the five probability
+    columns — i.e. they generate exactly the labels `label_gnubg.py` pays for and
+    bin them. Roughly 500 labelled positions per game go in the bin.
+
+    A sink is fed from those parsers so any gnubg run also produces training
+    data, in the against-gnubg distribution rather than champion self-play.
+    Always stores the DEEPEST row available (2 ply) regardless of how strongly
+    gnubg is being made to PLAY, since a weaker play setting is no reason to
+    keep a weaker label.
+
+    Self-guarding: `gnubg_h2h` feeds one shared sink from every worker thread,
+    from inside the eval parser rather than under its results lock. Appending to
+    two separate lists is NOT atomic across threads — two `add` calls can
+    interleave between the id append and the probs append and misalign every
+    subsequent pair — so the lock lives here rather than at the call sites.
+    """
+
+    def __init__(self):
+        self.ids: list[str] = []
+        self.probs: list[list[float]] = []
+        self._lock = threading.Lock()
+
+    def add(self, pos_id: str, vec5) -> None:
+        v = dist6_from5([float(x) for x in vec5])
+        with self._lock:
+            self.ids.append(pos_id)
+            self.probs.append(v)
+
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    def save(self, out: Path, source: str) -> int:
+        """Write an npz in the standard schema. Returns rows written."""
+        if not self.ids:
+            print("label sink: nothing captured, not writing", flush=True)
+            return 0
+        buckets = np.fromiter(
+            (bgcore.Board.from_id(p).route_bucket() for p in self.ids),
+            dtype=np.int8, count=len(self.ids))
+        _atomic_savez(
+            Path(out),
+            pos_ids=np.array(self.ids),
+            probs=np.asarray(self.probs, dtype=np.float32),
+            # No game followed most of these positions, so there is no honest
+            # hard label: they are only usable with --alpha 1.0 (soft labels),
+            # which every run so far has used.
+            outcomes=np.ones(len(self.ids), dtype=np.int8),
+            buckets=buckets,
+            teacher="gnubg", plies=2, source=source)
+        print(f"label sink: wrote {len(self.ids):,} captured labels -> {out}", flush=True)
+        return len(self.ids)
+
+
 _LAB = None
 
 

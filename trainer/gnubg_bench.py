@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 
 import bgcore
+from label_gnubg import END, ROW, LabelSink, row_depth
 
 import os
 # Path to gnubg-cli.exe. Override per-machine with the GNUBG_CLI env var so this
@@ -37,8 +38,12 @@ STATIC = re.compile(
     r"static:\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+[\d.]+\s+([+-][\d.]+)")
 
 
-def gnubg_static_equities(pos_ids):
-    """gnubg 0-ply cubeless equity for each position id (player-on-roll's view)."""
+def gnubg_static_equities(pos_ids, sink=None):
+    """gnubg 0-ply cubeless equity for each position id (player-on-roll's view).
+
+    With a `sink`, also keeps the five probability columns of the DEEPEST row in
+    each eval block (2 ply) — the labels this function otherwise throws away.
+    """
     cmds = ["set evaluation chequerplay eval plies 0", "new game"]
     for pid in pos_ids:
         cmds += [f"set board {pid}", "eval"]
@@ -46,6 +51,18 @@ def gnubg_static_equities(pos_ids):
     out = subprocess.run([GNUBG, "-t", "-q"], input="\n".join(cmds) + "\n",
                          capture_output=True, text=True).stdout
     eqs = [float(m.group(1)) for m in STATIC.finditer(out)]
+    if sink is not None:
+        best, best_depth, cap = None, -1, 0
+        for line in out.splitlines():
+            rm = ROW.match(line)
+            if rm:
+                d = row_depth(rm)
+                if d > best_depth:
+                    best, best_depth = [float(x) for x in rm.group(3).split()], d
+            elif END.search(line) and best is not None and cap < len(pos_ids):
+                sink.add(pos_ids[cap], best)
+                cap += 1
+                best, best_depth = None, -1
     if len(eqs) != len(pos_ids):
         raise RuntimeError(f"gnubg parse mismatch: {len(eqs)} equities for {len(pos_ids)} positions")
     return eqs
@@ -79,6 +96,9 @@ def main():
     ap.add_argument("--decisions", type=int, default=400)
     ap.add_argument("--eps", type=float, default=0.10)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--dump-labels", default=None,
+                    help="capture gnubg's 2-ply evaluation of every position it scores "
+                         "(otherwise discarded) into this npz under models/")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -108,7 +128,8 @@ def main():
         recs.append((slots, our_choice, term, phase_of(b)))
 
     print(f"evaluating {len(all_ids)} child positions through gnubg 0-ply...", flush=True)
-    gnu = gnubg_static_equities(all_ids)   # opponent equity per non-terminal child
+    sink = LabelSink() if args.dump_labels else None
+    gnu = gnubg_static_equities(all_ids, sink)   # opponent equity per non-terminal child
 
     errors, agree, phases = [], 0, []
     for (slots, our_choice, term, ph) in recs:
@@ -135,6 +156,8 @@ def main():
             e = errors[mask]
             ag = 100 * np.mean(e == 0)  # error 0 => we picked gnubg's best move
             print(f"  {ph:8s}         {mask.sum():6d}     {ag:5.1f}%     {e.mean()*1000:6.1f} mp")
+    if sink is not None:
+        sink.save(MODELS / args.dump_labels, f"gnubg_bench:{args.net}")
 
 
 if __name__ == "__main__":

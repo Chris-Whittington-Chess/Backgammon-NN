@@ -65,9 +65,12 @@ def main():
     ap.add_argument("--candidates", type=int, default=0, help="prune 2-ply+ nodes; 0 = full")
     ap.add_argument("--games", type=int, default=400)
     ap.add_argument("--workers", type=int, default=max(1, os.cpu_count() - 2))
+    ap.add_argument("--seed", type=int, default=1000,
+                    help="dice-stream base. Fixed by default so runs are comparable; "
+                         "vary it per iteration when tuning, or the tuner fits THESE dice.")
     args = ap.parse_args()
 
-    jobs = [(g, 1000 + g // 2, g % 2 == 0) for g in range(args.games)]  # mirrored dice
+    jobs = [(g, args.seed + g // 2, g % 2 == 0) for g in range(args.games)]  # mirrored dice
     print(f"A={args.a} vs B={args.b} at {args.ply}-ply | {args.games} games, mirrored "
           f"dice, {args.workers} workers\n", flush=True)
     t0 = time.time()

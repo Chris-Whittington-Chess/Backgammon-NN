@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 import bgcore
+from label_gnubg import END, ROW, LabelSink, row_depth
 
 import os
 # Path to gnubg-cli.exe. Override per-machine with the GNUBG_CLI env var so this
@@ -59,10 +60,17 @@ def equity_re(plies: int):
 
 
 class GnubgEngine:
-    """Persistent gnubg-cli process picking the best move among children at `plies`."""
+    """Persistent gnubg-cli process picking the best move among children at `plies`.
 
-    def __init__(self, plies: int = 0):
+    With a `sink`, the five probability columns gnubg prints for every child are
+    also captured instead of discarded — see `label_gnubg.LabelSink`. Move choice
+    is unaffected: it still uses the same equity from the same row as before, so
+    results stay comparable with runs made before capture existed.
+    """
+
+    def __init__(self, plies: int = 0, sink=None):
         self.plies = plies
+        self.sink = sink
         self.re = equity_re(plies)
         self.p = subprocess.Popen(
             [GNUBG, "-t", "-q"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -94,6 +102,11 @@ class GnubgEngine:
         self.p.stdin.write("".join(f"set board {pid}\neval\n" for pid in ids))
         self.p.stdin.flush()
         eqs = []
+        # Separate counter: at 0 ply the equity row IS the `static:` row, so
+        # `len(eqs)` has already advanced by the time the block terminator
+        # arrives and would misalign every captured label by one position.
+        cap = 0
+        best, best_depth = None, -1      # deepest 5-column row in the current block
         while len(eqs) < len(ids):
             try:
                 line = self.q.get(timeout=15)
@@ -101,6 +114,17 @@ class GnubgEngine:
                 raise RuntimeError("gnubg eval timed out")
             if line == "":
                 raise RuntimeError("gnubg process closed unexpectedly")
+            if self.sink is not None:
+                # Capture alongside, without touching the move-choice parse.
+                rm = ROW.match(line)
+                if rm:
+                    d = row_depth(rm)
+                    if d > best_depth:
+                        best, best_depth = [float(x) for x in rm.group(3).split()], d
+                elif END.search(line) and best is not None and cap < len(ids):
+                    self.sink.add(ids[cap], best)
+                    cap += 1
+                    best, best_depth = None, -1
             m = self.re.search(line)
             if m:
                 eqs.append(float(m.group(1)))
@@ -172,6 +196,11 @@ def main():
     ap.add_argument("--our-ply", type=int, default=0,
                     help="OUR net's search depth (0 = static eval, the historic default). "
                          "Set equal to --plies for an equal-depth comparison.")
+    ap.add_argument("--dump-labels", default=None,
+                    help="capture gnubg's 2-ply evaluation of every child it scores "
+                         "(~500 labelled positions per game, otherwise discarded) and "
+                         "write them to this npz under models/. Free DAgger data: it is "
+                         "the against-gnubg distribution, not champion self-play.")
     ap.add_argument("--our-candidates", type=int, default=4,
                     help="candidate filter for our 2-ply+ search; 0 = full width. "
                          "4 matches NativeNeuralEngine.CANDIDATES, i.e. what the app plays. "
@@ -182,6 +211,7 @@ def main():
     print(f"our net {args.net} (0-ply) vs gnubg {args.plies}-ply, {args.games} games, "
           f"mirrored dice, {args.workers} parallel workers\n", flush=True)
 
+    sink = LabelSink() if args.dump_labels else None
     jobs = queue.Queue()
     for g in range(args.games):
         jobs.put(g)
@@ -191,7 +221,7 @@ def main():
     t0 = time.time()
 
     def worker():
-        gnu = GnubgEngine(args.plies)
+        gnu = GnubgEngine(args.plies, sink)
         try:
             while True:
                 try:
@@ -206,7 +236,7 @@ def main():
                         gnu.close()
                     except Exception:
                         pass
-                    gnu = GnubgEngine(args.plies)
+                    gnu = GnubgEngine(args.plies, sink)
                     with lock:
                         skipped.append(g)
                     continue
@@ -243,6 +273,8 @@ def main():
     verdict = ("WE ARE STRONGER" if z > 1.96 else
                "GNUBG STRONGER" if z < -1.96 else "TOO CLOSE TO CALL")
     print(f"=> {verdict} vs gnubg {args.plies}-ply")
+    if sink is not None:
+        sink.save(MODELS / args.dump_labels, f"gnubg_h2h:{args.net}")
 
 
 if __name__ == "__main__":
