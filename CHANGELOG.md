@@ -9,6 +9,27 @@ Downloads: [Releases](../../releases). The app is a single self-contained
 
 ---
 
+## v1.10.0 — taught by GNU Backgammon
+
+- **The net no longer learns from itself.** Every label the project had tried —
+  self-play outcomes, its own rollouts, its own 1-ply and 2-ply search values —
+  converged on the same fixed point, because a student distilled from its own
+  engine cannot exceed it. The new net is trained on **22.5M positions labelled
+  with gnubg's 2-ply evaluation**, from scratch, in under an hour.
+- **It beats the v1.9.0 champion 53.9% at 0-ply and 53.4% at 1-ply** (z +13.70,
+  40,000 mirrored-dice games, PPG +0.082) — and it is the *same* 198→256→128
+  architecture, so it costs exactly what its predecessor cost per move. A
+  2.7×-larger net scored no better than it (49.5%, z −1.50).
+- **Against gnubg itself**, the deficit narrows from 43.4% to **46.1%** (PPG
+  −0.173 → −0.113), closing ~38% of the gap.
+- **New opponent: "Neural classic"** — the v1.9.0 net, kept as an easier rung.
+  The jump from *HCE* to the current net was the biggest step on the ladder.
+- Honest limits, all measured: pure distillation cannot pass its teacher (~50%
+  would be parity with gnubg 2-ply); labels stopped paying past ~17.5M; the
+  DAgger harvest added nothing on top of that; and extra search depth is worth
+  nothing against gnubg (0/1/2-ply all score ~46.2%). See
+  [`DEV_REPORT.md`](DEV_REPORT.md) §17-24.
+
 ## v1.8.0 — class-aware value net (race / crashed / contact)
 
 - The live net now routes its output heads by **gnubg-style position class** —

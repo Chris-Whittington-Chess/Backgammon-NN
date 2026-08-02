@@ -28,6 +28,14 @@ Everything below is about making that net *stronger*.
 | 14 | n-ply **search distillation** (1-ply → 2-ply) | ✅ **Best net** — 2-ply beats 1-ply; ~52% vs champ at 1-ply, search-robust | **v1.9.0** |
 | 15 | Strategic features on **clean** labels (198→212) | ❌ **Failed again** — raw & split both ~parity; features aren't the lever | no |
 | 16 | Exact **bear-off EGTB** + wire into eval | ◐ Exact endgame, but **0-ply-neutral** (never flips a 0-ply move) | infra |
+| 17 | **gnubg as external teacher** — is it strong enough? | 📊 0-ply **parity** (useless); 2-ply **clearly stronger** (43.9%, z −3.86) → valid teacher | tool |
+| 18 | **Distilling gnubg 2-ply labels** | ✅ **The win** — breaks the self-distillation fixed point; **+0.082 PPG at 1-ply**, z +13.70 | **v1.10.0** |
+| 19 | Warm-start vs scratch, at scale | 🔄 **Reversal** — `--init` helps at 60K, *hurts* at 2.5M+ (53.1% vs 52.4%) | recipe |
+| 20 | Capacity revisited (512×256, 2.7× params) | 🔄 **Reversal** — depth/width pays again *with a stronger teacher*; but same-speed net catches it on data | no |
+| 21 | Label volume scaling (500K → 2.5M → 17.5M) | ➖ **Flattening** — 5× gave a clear win, a further 7× was unresolved (z +1.91) | yes |
+| 22 | **DAgger harvest** (positions from games vs gnubg) | ❌ **No gain** — 5M harvested rows on top of 17.5M changed nothing (z −0.64) | infra |
+| 23 | Search depth against gnubg (0 / 1 / 2 ply) | ❌ **Null** — 46.1 / 46.3 / 46.3%; search is not the constraint | no |
+| 24 | gnubg **rollouts** as a teacher | ❌ **Rejected on cost** — ~0.3 s/trial/position and no machine-readable output | no |
 
 ---
 
@@ -221,6 +229,188 @@ bear-off moves. So it adds nothing to 0-ply play; its value is for deeper search
 decisions, and exact labels. A within-N-points hybrid extension (exact ≤9, mean+var 9–12) is
 queued.
 
+## 17. gnubg as an external teacher — 📊 the pre-check that unlocked §18
+Experiments 8–15 all landed on the same fixed point: **a student distilled from its own
+engine cannot exceed it.** Rollouts, untruncated rollouts, 1-ply and 2-ply search values,
+richer features — every axis converged to champion parity. The only escape is a teacher
+from *outside* the loop, and gnubg is the obvious candidate. But "world-class" is not the
+same as "stronger than us at the setting we can afford", so it had to be measured first.
+
+Two head-to-heads (mirrored dice, cubeless, our net at 0-ply):
+
+| teacher candidate | our champion scores | verdict |
+|---|---|---|
+| gnubg **0-ply** | **49.0%** (z −0.28, 200 games) | **parity — useless as a teacher** |
+| gnubg **2-ply** | **43.9%** (z −3.86, 1000 games) | **clearly stronger — valid teacher** |
+
+That distinction is the whole experiment. Labelling 60K positions with a parity teacher
+would have reproduced our own ceiling exactly, and the result would have looked like yet
+another "◐ parity" row in this table.
+
+**Two gnubg behaviours cost hours and are worth recording:**
+- **`set evaluation chequerplay eval plies N` does not affect the `eval` command.** Verified
+  by byte-comparing output at N = 0, 2 and 3: identical. gnubg *always* computes the full
+  static / 1-ply / 2-ply table and always ends with a `N-ply cubeless equity` summary. Its
+  strength in a bridge like ours is therefore decided **entirely by which row you parse** —
+  and the corollary is that the deep evaluation was being computed and thrown away all along,
+  so reading it costs nothing (~0.04 s per position either way).
+- **Positions gnubg answers from its bearoff databases print `static:` and no deeper rows.**
+  A parser that counts ` 2 ply:` lines silently comes up short, blocks, and times out. In the
+  head-to-head harness that *discarded whole games* — and the survivors were the fast ones,
+  i.e. a biased sample presented as a result. The fix is to delimit on the always-present
+  summary line and take the deepest row available; those static rows are database-exact, so
+  nothing is lost.
+
+## 18. Distilling gnubg 2-ply — ✅ the win (v1.10.0)
+Label positions with gnubg's 2-ply evaluation (the five nested probabilities, not just
+equity) and train on them directly. **~2,600 positions/sec** across 60 gnubg processes, so
+2.5M labels cost ~15 minutes — against **6h15m** for the 30K 1-ply-rollout labels this
+replaces, which had come back at parity.
+
+Progress against the v1.9.0 champion, all native, mirrored dice, verified at 1-ply:
+
+| labels | recipe | 0-ply | 1-ply |
+|---|---|---|---|
+| 500K | warm-start, 256×128 | 51.5% (z +4.16) PPG +0.026 | 50.9% (z +3.73) PPG +0.008 |
+| 2.5M | warm-start, 256×128 | 52.4% (z +6.80) PPG +0.061 | 52.3% (z +9.26) PPG +0.047 |
+| 2.5M | **scratch**, 512×256 | 54.3% (z +12.18) PPG +0.114 | 53.4% (z +13.52) PPG +0.077 |
+| 17.5M | scratch, 512×256 | 54.8% (z +13.51) PPG +0.131 | 53.6% (z +14.44) PPG +0.086 |
+| **22.5M** | **scratch, 256×128** | **53.9% (z +11.17) PPG +0.105** | **53.4% (z +13.70) PPG +0.082** |
+
+**The shipped net is the last row**, and the reason is the third column of §20: it is a
+256×128 — *the same architecture and inference cost as the champion it replaces* — yet it is
+statistically indistinguishable from the 2.7×-larger net (49.5%, z −1.50, 20,000 games).
+
+**It also moved the absolute needle**, which is the number that matters (4,000 games each):
+
+| | vs gnubg 2-ply |
+|---|---|
+| v1.9.0 champion | 43.4%, PPG −0.173 |
+| v1.10.0 net | **46.1%**, PPG −0.113 |
+
+~38% of the deficit to the teacher closed. Note the ceiling this implies: gnubg 2-ply beats
+the champion by ~6 points, so a *perfect* distillation would score ~56% against it. We
+capture roughly 40% of that headroom — pure distillation asymptotes at the teacher and
+cannot pass it.
+
+## 19. Warm-start vs scratch — 🔄 the advice inverts with scale
+`train_rollout.py` gained `--init` to warm-start from the champion, because training from
+scratch on 60K labels reached only **41%** against it — a number that measures *data volume*,
+not teacher quality. With the warm start the same data reached parity.
+
+At 2.5M the comparison reverses: **scratch 53.1% vs warm-started 52.4%**, identical data and
+architecture. The warm start anchors the net to the champion's weaker evaluation, and once
+there is enough teacher signal that anchor is a handicap rather than a head start. **Lesson:
+"initialise from the incumbent" is not a fixed truth — it is a statement about the ratio of
+teacher data to incumbent knowledge, and it flips as the data grows.**
+
+## 20. Capacity revisited — 🔄 it pays again, but data buys it back
+The CHANGELOG's standing verdict was that extra depth gave "clearly diminishing returns".
+That was measured **against self-play labels — a teacher no stronger than the student**.
+With gnubg as teacher, at fixed data (2.5M), 2.7× the parameters bought **+1.2 points**
+(53.1% → 54.3% at 0-ply): the bigger net has something it cannot already produce to learn
+*from*.
+
+But capacity is not free, and the app is not a benchmark:
+- **1.58×** the cost per static evaluation (measured on an idle box; a contended measurement
+  had said 1.96× — re-measure timings when the machine is busy).
+- **73 → 37 games/sec** in `nn_bench`, i.e. ~2× on whole games.
+- At **equal movetime** in the rollout engine — the app's default opponent, where the
+  evaluator *is* the playout policy — the advantage could not be demonstrated at all:
+  **52.0%, z +0.80** over 400 games.
+
+And then more data on the *small* net caught it (§18, last row): same speed, indistinguishable
+strength. **Lesson: price capacity in the currency the application spends — time per move —
+not in evaluations. A gain that needs 2× the compute must beat what the same compute buys
+elsewhere.**
+
+## 21. Label volume — ➖ flattening
+500K → 2.5M was a clear win. 2.5M → 17.5M (7×, using 15M labels generated on a second
+machine) moved PPG against the champion only **+0.114 → +0.131**, and head-to-head between
+those two nets was **z +1.91 — unresolved**. Validation loss was still falling, so the nets
+were still fitting the teacher better; it simply stopped translating into games.
+
+**Lesson: more of the same distribution has a knee, and validation loss will not tell you
+where it is** — only head-to-head games will. (A caution on reading those games early: this
+run's 1-ply gate read 54.8% at 7,000 games and finished at 53.6% over 40,000. Partial
+head-to-heads wander by more than the effects being measured.)
+
+## 22. DAgger harvest — ❌ no measurable gain
+Every label to this point came from **champion self-play positions**, so all the scaling above
+varied *volume* while holding *distribution* fixed. The harvester plays our net against gnubg
+and keeps the evaluations gnubg computes anyway — ~500 labelled positions per game, in the
+distribution where our net's errors are actually punished, at ~2,600 rows/sec. The DAgger
+argument is textbook: label the states the *student* visits, using the *expert*.
+
+It first looked promising. The 22.5M net (17.5M self-play + 5M harvested) beat the same
+architecture trained on 2.5M by **+0.050 PPG (z +5.37)**, where 7× more *self-play* data had
+given the 512×256 only an unresolved +0.019 — which reads as the distribution doing work.
+
+**The control says otherwise.** Training the identical architecture and recipe on the 17.5M
+*without* the harvest and playing the two directly: **49.8%, z −0.64, 20,000 games — no
+difference.** The harvest arm had 28% *more* data and still did not win, so the earlier
++0.050 was volume, not distribution.
+
+The honest reading is that this is §21 again: past ~17.5M, additional labels stop paying
+**whatever distribution they come from**. That does not refute DAgger — it says we are on the
+flat part of the curve, where 5M more rows of anything is lost in the noise. A real test would
+need the harvest to *replace* rather than *supplement* self-play data at a volume where the
+curve still has slope.
+
+**Lesson: when a promising result arrives confounded, the control is not optional.** The
+confound here (28% more rows) favoured the hypothesis, and the hypothesis still lost.
+
+**A subtlety worth keeping** for whenever this is retried: the free child evaluations only
+cover states where *we* are next to move. The states our net actually *evaluates* are the
+children of its own decisions — positions with the opponent on roll — and those never appear
+among them. Harvesting only the free ones would systematically miss the half the student
+spends its capacity on.
+
+**A subtlety worth recording:** the free child evaluations only cover states where *we* are
+next to move. The states our net actually *evaluates* are the children of its own decisions —
+positions with the opponent on roll — and those never appear among them. Harvesting only the
+free ones would systematically miss the half the student spends its capacity on.
+
+## 23. Search depth against gnubg — ❌ null
+With `--our-ply` added to the bridge (it had always pitted our *static* evaluation against a
+searching opponent, so no equal-depth comparison had ever been run), our net scores the same
+against gnubg 2-ply at every depth: **46.1% / 46.3% / 46.3%** at 0 / 1 / 2 ply, 3,000 games
+each, identical dice.
+
+This is a real null, not a broken harness: over 315 sampled positions, 0-ply and 1-ply choose
+**different moves 29.5%** of the time. Nor is it the candidate filter — 1-ply is full width,
+with no pruning and no mixed static/searched comparison, and scores the same as pruned 2-ply.
+An independent check agrees: `nn_bench` puts 1-ply over 0-ply at **51.5% ±6.9** for the
+champion, against 62.5% for an early net and 56.5% for the v1.8.0 net.
+
+**Lesson: as the evaluator improves, search buys less — and against a *stronger* opponent it
+buys nothing measurable. Lookahead built on a biased evaluator propagates the bias.**
+Evaluation is the binding constraint; search tuning was parked on this evidence.
+
+## 24. gnubg rollouts as a teacher — ❌ rejected on cost
+If gnubg's 2-ply sets the ceiling, its rollouts would raise it. Measured before building
+anything: **14s for 36 trials, 51s for 144 trials — ~0.3 s per trial per position**, barely
+changed by dropping to 0-ply chequerplay with variance reduction and quasi-random off (11s).
+That is ~10⁵× the cost of a 2-ply label. Worse, `gnubg-cli -t -q` prints "Rollout done.
+Printing final results." and nothing parseable follows.
+
+**gnubg's 2-ply `eval` is the strongest teacher it will practically give us**, which fixes the
+distillation ceiling at ~parity with gnubg 2-ply. **Lesson: price the teacher before designing
+around it** — the same lesson as §14, learned again on the other side of the fence.
+
+## Infrastructure that unblocked the above
+- **A memory bug was silently capping dataset size.** `train_rollout.py` built its feature
+  matrix with `np.stack` over a list comprehension, where every row is 198 *boxed* Python
+  floats: measured **1.61 GB per 200K positions — 182 GB at 22.5M**, against 128 GB of RAM.
+  The 22.5M run died during loading with an empty log; the 17.5M run had only survived by
+  paging. Filling a preallocated array holds peak at ~19 GB, so 50M+ is now reachable. Every
+  "how much data can we use" question before this was answering the wrong question.
+- **Free labels.** gnubg comparison runs discard ~500 labelled positions per game; roughly
+  **7.6M** were binned in a single day of benchmarking before `--dump-labels` was added to the
+  h2h and bench harnesses.
+- **`merge_npz.py` could not merge a merged file** — it wrote `net=None`, which numpy stores
+  as an object array that will not load without `allow_pickle`.
+
 ---
 
 ## Cross-cutting lessons
@@ -263,5 +453,10 @@ queued.
 ## Shipped milestones
 - **v1.7.0** — pip-count output-bucketed net (experiment 5).
 - **v1.8.0** — class-aware routing net (experiment 6).
-- **v1.9.0** — 2-ply search-distillation net (experiment 14), current live net. Near-parity
-  with gnubg at 0-ply; the exact bear-off EGTB (§16) ships alongside for search/cube/labels.
+- **v1.9.0** — 2-ply search-distillation net (experiment 14). Kept in the app as the
+  **"Neural classic"** opponent — an easier rung between HCE and the current net.
+- **v1.10.0** — **gnubg-distilled net** (experiments 17–18), current live net. A 198→256→128
+  body with 12 routed heads, trained from scratch on **22.5M gnubg-2-ply-labelled positions**
+  in under an hour. Beats the v1.9.0 champion **53.9% at 0-ply** and **53.4% at 1-ply**
+  (z +13.70, 40,000 games) at **identical inference cost**, and closes ~38% of the gap to
+  gnubg 2-ply itself (43.4% → 46.1%).

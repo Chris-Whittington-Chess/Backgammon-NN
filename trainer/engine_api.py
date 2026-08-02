@@ -108,12 +108,16 @@ class NativeNeuralEngine(BaseEngine):
     # Bound the branching of 2-ply+ search (0 = full width, fine for 0/1-ply).
     CANDIDATES = 4
 
-    def __init__(self, onnx_path, lookahead: int = 0, candidates: int | None = None):
+    def __init__(self, onnx_path, lookahead: int = 0, candidates: int | None = None,
+                 label: str = "Neural"):
         if candidates is None:
             candidates = self.CANDIDATES if lookahead >= 2 else 0
         self._nn = bgcore.Neural(str(onnx_path), lookahead, candidates)
         self.lookahead = lookahead
-        self.name = f"Neural — {lookahead}-ply"
+        # `label` distinguishes nets in the opponent list: the app offers the
+        # current net and an older, weaker one as an easier rung, and they would
+        # otherwise collide on the same name and overwrite each other.
+        self.name = f"{label} — {lookahead}-ply"
 
     def static_equity(self, board) -> float:
         """Net equity for the side to move at a single position (0-ply)."""

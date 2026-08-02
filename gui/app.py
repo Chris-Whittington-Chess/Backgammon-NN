@@ -721,6 +721,17 @@ class MainWindow(QMainWindow):
                 self.opponents[e.name] = e
             self.evaluator = neurals[0]
 
+        # An easier neural rung. The current net is a long way above HCE, so the
+        # jump from "HCE" to "Neural — 0-ply" is the biggest step on the ladder;
+        # the previous champion (v1.9.0, kept as td_classic.onnx) fills it. Same
+        # architecture and speed, measurably weaker: the current net beats it
+        # 53.4% at 1-ply over 40,000 games.
+        classic_onnx = ROOT / "models" / "td_classic.onnx"
+        if hasattr(bgcore, "Neural") and classic_onnx.exists():
+            for p in (0, 1):
+                e = NativeNeuralEngine(classic_onnx, lookahead=p, label="Neural classic")
+                self.opponents[e.name] = e
+
         # Phase-routing engines: champion for contact, race net for race (the race
         # net beats min-pip by ~+0.25 PPG in the bear-off). PHASE_CONTACT picks the
         # contact net — the mature champion `td.onnx` by default; swap to
