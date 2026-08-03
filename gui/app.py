@@ -756,13 +756,27 @@ class MainWindow(QMainWindow):
         self.opponents["HCE (heuristic)"] = HceEngine()
         self.opponents["Random"] = RandomEngine()
 
-        # Play the strongest opponent available by default: rollouts beat 2-ply
-        # search, which beats shallower search (see the Elo ladder in the README).
-        # `neurals` is ordered by depth, so its last entry is the deepest.
-        best_neural = neurals[-1] if neurals else None
-        self.default_engine = (
-            rollout or best_neural or self.opponents["HCE (heuristic)"]
-        )
+        # Default to the strongest opponent THIS machine can actually run.
+        #
+        # A rollout gets a fixed movetime per move, so cores buy playouts and
+        # playouts buy accuracy — its strength depends on the hardware in a way
+        # fixed-depth search does not. Measured (trainer/ladder.py, mirrored
+        # dice): with 8 cores the rollout engine scores 47.0% against plain
+        # 1-ply search (PPG -0.173, 300 games), i.e. no better, while 2-ply is
+        # the strongest fixed-depth setting everywhere. On a large machine it
+        # plays out many times more games per move and takes the lead again.
+        #
+        # The exact crossover is unmeasured, so this line is deliberately
+        # conservative: prefer 2-ply unless the machine is clearly big.
+        ROLLOUT_MIN_CORES = 32
+        cores = os.cpu_count() or 1
+        best_neural = neurals[-1] if neurals else None      # ordered by depth
+        if rollout is not None and cores >= ROLLOUT_MIN_CORES:
+            self.default_engine = rollout
+        else:
+            self.default_engine = (
+                best_neural or rollout or self.opponents["HCE (heuristic)"]
+            )
         # Hints list the *top few* moves, so they need an engine that ranks every
         # move — RolloutEngine only ever reports the one it picked. So hints use
         # the deepest search instead of the outright strongest engine.

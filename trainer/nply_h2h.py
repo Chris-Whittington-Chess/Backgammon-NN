@@ -25,10 +25,13 @@ MODELS = Path(__file__).resolve().parent.parent / "models"
 _A = _B = None
 
 
-def _init(a_path, b_path, ply, cand):
+def _init(a_path, b_path, ply_a, ply_b, cand):
     global _A, _B
-    _A = bgcore.Neural(a_path, ply, cand)
-    _B = bgcore.Neural(b_path, ply, cand)
+    # Separate depths so a net can be played against ITSELF at a different ply —
+    # that is the only way to measure what a rung of search is worth, and it is
+    # what the Elo ladder's search steps are built from.
+    _A = bgcore.Neural(a_path, ply_a, cand if ply_a >= 2 else 0)
+    _B = bgcore.Neural(b_path, ply_b, cand if ply_b >= 2 else 0)
 
 
 def _best(net, board, d1, d2):
@@ -61,7 +64,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--a", required=True, help="candidate net (.onnx)")
     ap.add_argument("--b", required=True, help="baseline/champion net (.onnx)")
-    ap.add_argument("--ply", type=int, default=1)
+    ap.add_argument("--ply", type=int, default=1, help="depth for BOTH sides unless overridden")
+    ap.add_argument("--ply-a", type=int, default=None, help="A's depth (default: --ply)")
+    ap.add_argument("--ply-b", type=int, default=None, help="B's depth (default: --ply)")
     ap.add_argument("--candidates", type=int, default=0, help="prune 2-ply+ nodes; 0 = full")
     ap.add_argument("--games", type=int, default=400)
     ap.add_argument("--workers", type=int, default=max(1, os.cpu_count() - 2))
@@ -70,14 +75,17 @@ def main():
                          "vary it per iteration when tuning, or the tuner fits THESE dice.")
     args = ap.parse_args()
 
+    ply_a = args.ply if args.ply_a is None else args.ply_a
+    ply_b = args.ply if args.ply_b is None else args.ply_b
+    depth = f"{ply_a}-ply" if ply_a == ply_b else f"A {ply_a}-ply vs B {ply_b}-ply"
     jobs = [(g, args.seed + g // 2, g % 2 == 0) for g in range(args.games)]  # mirrored dice
-    print(f"A={args.a} vs B={args.b} at {args.ply}-ply | {args.games} games, mirrored "
+    print(f"A={args.a} vs B={args.b} at {depth} | {args.games} games, mirrored "
           f"dice, {args.workers} workers\n", flush=True)
     t0 = time.time()
     a_path, b_path = str(MODELS / args.a), str(MODELS / args.b)
     results = []
     with mp.Pool(args.workers, initializer=_init,
-                 initargs=(a_path, b_path, args.ply, args.candidates)) as pool:
+                 initargs=(a_path, b_path, ply_a, ply_b, args.candidates)) as pool:
         for i, r in enumerate(pool.imap_unordered(_play, jobs, chunksize=4)):
             results.append(r)
             if (i + 1) % 50 == 0:
@@ -92,7 +100,7 @@ def main():
     wr = w / n
     z = (wr - 0.5) / math.sqrt(0.25 / n)
     print(f"\nA ({args.a}) wins {100*wr:.1f}%  (z={z:+.2f})  PPG {pts/n:+.3f}  vs B "
-          f"({args.b}) at {args.ply}-ply | {n} games in {time.time()-t0:.0f}s")
+          f"({args.b}) at {depth} | {n} games in {time.time()-t0:.0f}s")
     print("=>", "A STRONGER" if z > 1.96 else "B STRONGER" if z < -1.96 else "TOO CLOSE TO CALL")
 
 

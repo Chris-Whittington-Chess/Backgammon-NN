@@ -103,11 +103,14 @@ def main() -> None:
         fail("no neural opponents — td.onnx did not load inside the bundle")
     if report.get("evaluator") != "NativeNeuralEngine":
         fail(f"expected the native engine, got {report.get('evaluator')}")
-    # The app should open on its strongest opponent, which is the rollout engine
-    # whenever the rollout bindings and the net are both present.
-    if not report.get("default_opponent", "").startswith("Rollout"):
-        fail(f"expected the app to default to the rollout engine, got "
-             f"{report.get('default_opponent')!r}")
+    # The app opens on the strongest opponent THIS machine can run: the rollout
+    # engine on a big box, 2-ply search otherwise (a rollout's strength scales
+    # with cores, fixed-depth search does not — see gui/app.py). Either is a
+    # valid build; a weaker default means the neural engines failed to load.
+    default = report.get("default_opponent", "")
+    if not (default.startswith("Rollout") or default.startswith("Neural")):
+        fail(f"expected the app to default to the rollout or a neural engine, got {default!r}")
+    print(f"  (default chosen for {os.cpu_count()} logical cores)")
     # A build that ships silent audio looks fine from the outside: the old
     # QSoundEffect path reported Ready and isPlaying while emitting nothing. So
     # require the sink to actually go active on a real play.
