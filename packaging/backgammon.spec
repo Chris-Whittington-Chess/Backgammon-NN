@@ -35,7 +35,7 @@ a = Analysis(
         (str(ROOT / "gui" / "assets"), "assets"),
     ],
     # The engine extension, plus the trainer-side modules app.py imports by name.
-    hiddenimports=["bgcore", "cube", "engine_api", "sounds"],
+    hiddenimports=["bgcore", "cube", "match", "engine_api", "sounds"],
     hookspath=[],
     runtime_hooks=[],
     excludes=[

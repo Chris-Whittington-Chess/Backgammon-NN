@@ -9,6 +9,29 @@ Downloads: [Releases](../../releases). The app is a single self-contained
 
 ---
 
+## v1.11.0 — a real doubling cube, and match play
+
+- **The cube model is no longer three hard-coded thresholds.** Cube decisions now
+  come from **Janowski's cubeful equity** computed from the net's own five
+  probabilities — take and cash points *derive* from the position instead of
+  being tuned constants, and they reduce to the canonical 25%/20% and 75%/80% at
+  a dead/live cube.
+- **Gammons finally count.** The app used to hand the cube model a single equity
+  number, which discarded exactly what a cube decision turns on. At a fixed 78%
+  win probability, a dry race is now a *take* while the same win rate with heavy
+  gammon threats is a *pass*. Cube **ownership** is likewise passed through
+  rather than assumed centred.
+- **"Too good" works properly** — the engine plays on for the gammon instead of
+  cashing, which the old equity window could only approximate with a ceiling.
+- **Match play.** A *Match* selector offers money play or a match to 1/3/5/7/11.
+  In a match the decisions trade in **match-winning chance**, not points, via a
+  gammon-aware match equity table; a take that is routine for money can be wrong
+  at some scores. The **Crawford rule** is implemented: the single game after
+  either side reaches match-point is played with no cube, and the cube returns
+  afterwards.
+- Note for anyone comparing with the old app: the taker now takes down to a
+  mover equity of ~0.573 where the old fixed threshold was 0.50.
+
 ## v1.10.0 — taught by GNU Backgammon
 
 - **The net no longer learns from itself.** Every label the project had tried —

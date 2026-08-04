@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
 
 import bgcore
 import cube
+import match
 from engine_api import (
     HceEngine,
     NativeNeuralEngine,
@@ -87,6 +88,13 @@ DEST_FILL = QColor(70, 220, 120, 150)
 
 # What the help panel says. Kept next to the code it describes so it can't
 # quietly drift out of date.
+# Match lengths offered in the toolbar. 0 = money play (the historic behaviour):
+# unlimited games, points simply accumulate. Anything else is a match to that many
+# points, with the Crawford rule.
+MATCH_OPTIONS = [("Money play", 0), ("Match to 1", 1), ("Match to 3", 3),
+                 ("Match to 5", 5), ("Match to 7", 7), ("Match to 11", 11)]
+
+
 HELP_LINES = [
     # key=None spans the full width — an intro line, not a key/value row.
     (None, "Anything pulsing wants a click. Hover it and a box"),
@@ -108,7 +116,12 @@ HELP_LINES = [
     ("", "rising from the bottom; red is the engine."),
     ("Pips", "Corner counts: how far each side has left to travel."),
     ("Cube", "Doubles the stakes. The number is the current multiplier."),
-    ("Opponent", "Rollout is strongest; drop to 2/1/0-ply for an easier game."),
+    ("Opponent", "Rollout is strongest on a big machine; 2-ply otherwise."),
+    ("", "Neural classic is the previous champion — a gentler game."),
+    ("Match", "Money play, or a match to N points. In a match the cube"),
+    ("", "decisions change: what matters is the chance of winning the"),
+    ("", "MATCH, not points. The game after either side reaches"),
+    ("", "match-point is the Crawford game — played with no cube."),
 ]
 
 
@@ -678,7 +691,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("&File")
         new_act = QAction("&New Game", self)
         new_act.setShortcut("Ctrl+N")
-        new_act.triggered.connect(self.new_game)
+        new_act.triggered.connect(self.on_new_game)
         undo_act = QAction("&Undo move", self)
         undo_act.setShortcut("Ctrl+Z")
         undo_act.triggered.connect(self.undo_submove)
@@ -797,6 +810,10 @@ class MainWindow(QMainWindow):
         self.hint_btn = HoverButton("Hint", self.on_hint_hover)
         self.hint_btn.setToolTip("Hover to see the best moves ranked")
         self.new_btn = QPushButton("New Game")
+        self.match_box = QComboBox()
+        self.match_box.addItems([n for n, _ in MATCH_OPTIONS])
+        self.match_box.setToolTip("Money play, or a match to N points (Crawford applies)")
+        self.match_box.currentIndexChanged.connect(self.on_match_length)
         self.opp_box = QComboBox()
         self.opp_box.addItems(list(self.opponents.keys()))
         self.opp_box.setCurrentText(self.default_engine.name)
@@ -806,7 +823,7 @@ class MainWindow(QMainWindow):
         self.drop_btn.clicked.connect(self.on_drop)
         self.undo_btn.clicked.connect(self.undo_submove)
         self.hint_btn.clicked.connect(self.on_hint)
-        self.new_btn.clicked.connect(self.new_game)
+        self.new_btn.clicked.connect(self.on_new_game)
         self.take_btn.setVisible(False)
         self.drop_btn.setVisible(False)
 
@@ -825,6 +842,7 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         for w in (self.roll_btn, self.double_btn, self.take_btn, self.drop_btn,
                   self.undo_btn, self.hint_btn, self.new_btn,
+                  QLabel("Match:"), self.match_box,
                   QLabel("Opponent:"), self.opp_box):
             controls.addWidget(w)
         controls.addWidget(self.help_btn)
@@ -868,7 +886,14 @@ class MainWindow(QMainWindow):
         self._open_timer.setInterval(250)
         self._open_timer.timeout.connect(self._open_tick)
         self.busy = False
-        self.score = [0, 0]          # cumulative points [you, engine]
+        self.score = [0, 0]          # points [you, engine] — this match, or cumulative
+        # Match play. `match_to` 0 = money play. Crawford: the single game played
+        # right after either side reaches match-point is played without a cube.
+        self.match_to = 0
+        self.in_crawford = False       # this game is the Crawford game
+        self.next_is_crawford = False  # the next one will be
+        self.crawford_used = False     # it has already been played this match
+        self.match_over = False
         self.pending_double = False  # engine offered a double, awaiting take/drop
         self.combos = {}             # two-dice destinations for the held checker
         self._tasks = []             # in-flight engine work
@@ -965,7 +990,7 @@ class MainWindow(QMainWindow):
             bool(self.undo_stack) and self.human_turn and not self.busy and not self.game_over)
         self.hint_btn.setEnabled(
             self.human_turn and bool(self.remaining) and self.full_roll and not self.game_over)
-        self.score_label.setText(f"You {self.score[0]} — {self.score[1]} Engine")
+        self.score_label.setText(self._score_text())
         self.eval_bar.set_value(self._win_prob())
         self.view.wink_dice = roll_time
         self.view.wink_cube = self.pending_double
@@ -982,6 +1007,57 @@ class MainWindow(QMainWindow):
         self.view.hover_zone = self.view._zone_at(
             self.view.mapFromGlobal(QCursor.pos()).toPointF())
         self.view.update()
+
+    # --- match flow ---
+    def on_match_length(self, idx):
+        """Changing the match length starts a fresh match."""
+        self.match_to = MATCH_OPTIONS[idx][1]
+        self.new_match()
+
+    def on_new_game(self):
+        """`New Game` continues the match; once the match is decided it starts a
+        new one, so the button never becomes a dead end."""
+        if self.match_over:
+            self.new_match()
+        else:
+            self.new_game()
+
+    def new_match(self):
+        self.score = [0, 0]
+        self.in_crawford = False
+        self.next_is_crawford = False
+        self.crawford_used = False
+        self.match_over = False
+        self.new_game()
+
+    def _score_text(self):
+        if not self.match_to:
+            return f"You {self.score[0]} — {self.score[1]} Engine"
+        tag = " · Crawford" if self.in_crawford else ""
+        return (f"To {self.match_to} · You {self.score[0]} — "
+                f"{self.score[1]} Engine{tag}")
+
+    def _away(self, mover_is_human: bool):
+        """(mover's away score, opponent's away score) — points each still needs."""
+        me, opp = (0, 1) if mover_is_human else (1, 0)
+        return (max(1, self.match_to - self.score[me]),
+                max(1, self.match_to - self.score[opp]))
+
+    def _cube_decision(self, board, mover_is_human: bool):
+        """The cube decision for the side on roll, money or match.
+
+        Match-play decisions trade in match-winning chance, not points: a take
+        that is routine for money can be wrong at some scores and vice versa.
+        Both return objects exposing `.action` and `.take`, so callers do not
+        care which model answered.
+        """
+        dist = self._cube_dist(board)
+        owner = self._cube_owner_for(mover_is_human)
+        if self.match_to:
+            a, b = self._away(mover_is_human)
+            return match.match_cube_action(dist, a, b, self.cube_value, owner,
+                                           self.in_crawford)
+        return cube.cube_action(dist, owner)
 
     # --- game flow ---
     def new_game(self):
@@ -1004,6 +1080,8 @@ class MainWindow(QMainWindow):
         self.turn_no = 1
         self.cube_value = 1
         self.cube_owner = None       # None = centered, 0 = you, 1 = engine
+        self.in_crawford = self.next_is_crawford
+        self.next_is_crawford = False
         self.pending_double = False
         self.take_btn.setVisible(False)
         self.drop_btn.setVisible(False)
@@ -1156,6 +1234,9 @@ class MainWindow(QMainWindow):
         return combos
 
     def may_double(self, side):
+        # The Crawford game is played without a cube — that is the whole rule.
+        if self.match_to and self.in_crawford:
+            return False
         return (not self.game_over and self.cube_value < 64
                 and self.cube_owner in (None, side))
 
@@ -1343,8 +1424,7 @@ class MainWindow(QMainWindow):
                 and self.may_double(0)):
             return
         # Your position, so the distribution and the cube owner are in your frame.
-        dec = cube.cube_action(self._cube_dist(self.board),
-                               self._cube_owner_for(mover_is_human=True))
+        dec = self._cube_decision(self.board, mover_is_human=True)
         if dec.take:
             self.cube_value *= 2
             self.cube_owner = 1  # engine owns the cube now
@@ -1373,8 +1453,26 @@ class MainWindow(QMainWindow):
         self.pending_double = False
         self.score[winner] += points
         who = "You" if winner == 0 else "Engine"
-        self.refresh(f"{reason}. {who} +{points} (score {self.score[0]}-{self.score[1]}). "
-                     f"New Game to continue.")
+
+        if not self.match_to:
+            self.refresh(f"{reason}. {who} +{points} "
+                         f"(score {self.score[0]}-{self.score[1]}). New Game to continue.")
+            return
+
+        # A Crawford game has now been played, so the cube returns next game.
+        if self.in_crawford:
+            self.crawford_used = True
+        if self.score[winner] >= self.match_to:
+            self.match_over = True
+            self.refresh(f"{reason}. {who} win the match {self.score[0]}-{self.score[1]}. "
+                         f"New Game starts another.")
+            return
+        # Crawford is the ONE game following either side reaching match-point.
+        if not self.crawford_used and max(self.score) == self.match_to - 1:
+            self.next_is_crawford = True
+        nxt = " Next game is Crawford — no cube." if self.next_is_crawford else ""
+        self.refresh(f"{reason}. {who} +{points} (match {self.score[0]}-{self.score[1]} "
+                     f"to {self.match_to}).{nxt} New Game to continue.")
 
     def engine_turn(self):
         """Engine's turn: consider doubling, otherwise roll and play."""
@@ -1385,9 +1483,8 @@ class MainWindow(QMainWindow):
             return
         # The cube decision is a rollout too — off the UI thread with the rest.
         board = self.board
-        owner = self._cube_owner_for(mover_is_human=False)   # engine is on roll
         self.busy = True
-        self._run_async(lambda: cube.cube_action(self._cube_dist(board), owner),
+        self._run_async(lambda: self._cube_decision(board, mover_is_human=False),
                         self._engine_cube_decided)
 
     def _engine_cube_decided(self, dec):
