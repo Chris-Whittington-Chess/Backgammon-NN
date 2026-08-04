@@ -84,11 +84,55 @@ def test_opponent_owns_cannot_double():
     assert d.action == "no double", d
 
 
-def test_trailer_takes_lighter_than_money():
-    # 2-away vs 4-away: the trailer (4-away) faces a double at 2-away/... has strong
-    # recube leverage, so the take point should sit below the money 25% dead point.
-    tp = match.take_point_match(a=4, b=2, cube=1)   # taker is 4-away
-    assert tp < 0.25, tp
+def test_two_away_taker_takes_lighter_than_money():
+    # The taker is 2-away, so a doubled game *wins the match* — the gain from
+    # taking is enormous and the risk small. Take points here sit well under the
+    # money 25%.
+    tp = match.take_point_match(a=2, b=5, cube=1)   # taker 2-away, doubler 5-away
+    assert tp < 0.20, tp
+
+
+def test_two_away_doubler_raises_the_take_point():
+    # The mirror image, and the one that is easy to get backwards: against a
+    # 2-away DOUBLER the cube is dead at 2 — losing ends the match — so the take
+    # is expensive and the take point rises above the money 25%.
+    for taker in (3, 4, 5, 6, 7):
+        tp = match.take_point_match(a=taker, b=2, cube=1)
+        assert tp > 0.25, (taker, tp)
+
+
+def test_never_drop_when_a_drop_loses_the_match():
+    # Doubler is 1-away: passing hands them the match, so there is no price at
+    # which dropping is right.
+    for taker in range(1, 8):
+        assert match.take_point_match(a=taker, b=1, cube=1) == 0.0, taker
+
+
+def test_post_crawford_beats_crawford_for_the_trailer():
+    # The Crawford game is played cubeless; the moment it is over the cube comes
+    # back and the trailer's equity jumps. Reading one table for both was the bug
+    # a single mwc() lookup used to have.
+    assert match.mwc(2, 1) < 0.35                                # Crawford game
+    assert match.mwc(2, 1, post_crawford=True) > 0.45            # cube is back
+    for n in range(1, 10):
+        assert approx(match.mwc(1, n, post_crawford=True),
+                      1.0 - match.mwc(n, 1, post_crawford=True)), n
+
+
+def test_published_table_disagrees_with_the_cubeless_recursion():
+    # Guards the swap itself: the recursion is still reachable past the table's
+    # edge, and it is biased towards the leader at lopsided scores — which is the
+    # whole reason for using a published table.
+    assert approx(match.mwc(1, 5), 0.84179)                      # Kazaross XG2
+    recursion = match._mwc_recursive(1, 5, 260)
+    assert recursion > match.mwc(1, 5) + 0.05, recursion
+
+
+def test_beyond_the_table_falls_back_and_stays_sane():
+    big = match.MAX_AWAY + 5
+    m = match.mwc(big, big)
+    assert approx(m, 0.5, 1e-9), m
+    assert 0.0 <= match.mwc(big, 3) <= match.mwc(3, big) <= 1.0
 
 
 if __name__ == "__main__":

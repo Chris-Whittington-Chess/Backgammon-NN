@@ -1055,8 +1055,12 @@ class MainWindow(QMainWindow):
         owner = self._cube_owner_for(mover_is_human)
         if self.match_to:
             a, b = self._away(mover_is_human)
+            # Crawford and post-Crawford read different equity tables — once the
+            # Crawford game is behind us the cube is back and the trailer is
+            # worth far more (2-away/1-away: 32% during Crawford, 49% after).
             return match.match_cube_action(dist, a, b, self.cube_value, owner,
-                                           self.in_crawford)
+                                           self.in_crawford,
+                                           post_crawford=self.crawford_used)
         return cube.cube_action(dist, owner)
 
     # --- game flow ---
@@ -1707,7 +1711,18 @@ def selftest(report_path: str) -> int:
         report["cube_match"] = win._cube_decision(board, mover_is_human=True).action
         win.in_crawford = True
         report["crawford_no_cube"] = not win.may_double(0)
-        win.match_to, win.in_crawford, win.score = 0, False, [0, 0]
+        win.in_crawford = False
+        # 4-away/1-away as the trailer: this game's children land on scores where
+        # the Crawford and post-Crawford tables diverge, so the two answers must
+        # differ — which proves the equity table got bundled AND that the flag is
+        # threaded, neither of which a successful import would show.
+        win.score = [1, 4]
+        win.crawford_used = False
+        crawford_mwc = win._cube_decision(board, mover_is_human=True).mwc_nodouble
+        win.crawford_used = True
+        post_mwc = win._cube_decision(board, mover_is_human=True).mwc_nodouble
+        report["post_crawford_gain"] = round(post_mwc - crawford_mwc, 4)
+        win.match_to, win.score, win.crawford_used = 0, [0, 0], False
 
         report["torch_imported"] = "torch" in sys.modules
         report["ok"] = True

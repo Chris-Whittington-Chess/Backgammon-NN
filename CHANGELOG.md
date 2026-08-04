@@ -9,6 +9,33 @@ Downloads: [Releases](../../releases). The app is a single self-contained
 
 ---
 
+## Unreleased
+
+- **Match equity now comes from Kazaross XG2**, the rollout-derived published
+  table (transcribed from gnubg, which uses it as its own default), replacing the
+  cubeless recursion v1.11.0 shipped with.
+  The recursion was not merely imprecise, it was **biased**: being cubeless it
+  never priced the trailer's ability to double their way back into the match, so
+  it flattered whoever was ahead — by **7 to 9 points of match equity** at exactly
+  the lopsided scores where cube decisions turn. At 1-away/5-away it read 93.6%
+  where the real figure is 84.2%. It passed every test it had, because the tests
+  checked the properties it *did* get right (50% at double match point,
+  antisymmetry, monotonicity) and none that a wrong-but-consistent table would
+  fail.
+- **Crawford and post-Crawford are now separate tables.** They were being read as
+  one, which understated the trailer badly: at 2-away/1-away the Crawford game is
+  worth 32.3% but the game *after* it is worth 48.8%, because the cube comes back
+  and a trailer who doubles immediately needs to win only one game. Every equity
+  lookup now carries which phase it is in, including the point that the children
+  of a Crawford game are post-Crawford.
+- **This changes how the app plays a match**: across a sample of scores and
+  positions, about a third of cube decisions differ. Two are worth naming because
+  both are textbook and both were previously wrong — leading 2-away you now
+  double aggressively (a 2-cube wins the match, so there is nothing to save the
+  cube for), and facing a double at 2-away you take much more freely.
+- The packaged app's selftest now asserts the equity table actually made it into
+  the bundle, by checking that its Crawford and post-Crawford answers differ.
+
 ## v1.11.0 — a real doubling cube, and match play
 
 - **The cube model is no longer three hard-coded thresholds.** Cube decisions now

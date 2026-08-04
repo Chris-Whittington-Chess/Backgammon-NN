@@ -128,10 +128,17 @@ def main() -> None:
             fail(f"{k}: no cube decision returned from the packaged app")
     if not report.get("crawford_no_cube"):
         fail("the Crawford game offered a cube in the packaged app")
+    # The published equity table is a generated module the spec has to pick up.
+    # If it fell out of the bundle, match.py silently drops to its fallback
+    # recursion and the Crawford / post-Crawford answers collapse together.
+    if not report.get("post_crawford_gain", 0) > 0:
+        fail("post-Crawford equity matched the Crawford game — met_kazaross.py "
+             "is missing from the bundle, or the flag isn't reaching match.py")
 
     for k in ("opponents", "default_opponent", "hint_engine", "evaluator",
               "engine", "best_move_31", "equity", "sound",
-              "cube_money", "cube_match", "crawford_no_cube"):
+              "cube_money", "cube_match", "crawford_no_cube",
+              "post_crawford_gain"):
         print(f"  {k:18} {report[k]}")
 
     size_mb = EXE.stat().st_size / 1e6
