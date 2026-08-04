@@ -207,9 +207,16 @@ def main():
                          "Ignored below 2 ply, which is full width anyway.")
     args = ap.parse_args()
 
-    net = bgcore.Neural(str(MODELS / args.net), 0, 0)  # Sync: shared across threads
-    print(f"our net {args.net} (0-ply) vs gnubg {args.plies}-ply, {args.games} games, "
-          f"mirrored dice, {args.workers} parallel workers\n", flush=True)
+    # The search depth lives in the CONSTRUCTOR, not in which scoring function is
+    # called: `scores()` on a net built at 0 ply returns static values however it
+    # is invoked. This was hardcoded to (0, 0), so every `--our-ply 2` run before
+    # 2026-08-04 actually played our net at 0 ply against a searching gnubg, and
+    # `--our-candidates` was parsed but never reached the engine.
+    cand = args.our_candidates if args.our_ply >= 2 else 0
+    net = bgcore.Neural(str(MODELS / args.net), args.our_ply, cand)  # shared across threads
+    print(f"our net {args.net} ({args.our_ply}-ply) vs gnubg {args.plies}-ply, "
+          f"{args.games} games, mirrored dice, {args.workers} parallel workers\n",
+          flush=True)
 
     sink = LabelSink() if args.dump_labels else None
     jobs = queue.Queue()
