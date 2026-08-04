@@ -29,10 +29,19 @@ Downloads: [Releases](../../releases). The app is a single self-contained
   lookup now carries which phase it is in, including the point that the children
   of a Crawford game are post-Crawford.
 - **This changes how the app plays a match**: across a sample of scores and
-  positions, about a third of cube decisions differ. Two are worth naming because
-  both are textbook and both were previously wrong — leading 2-away you now
-  double aggressively (a 2-cube wins the match, so there is nothing to save the
-  cube for), and facing a double at 2-away you take much more freely.
+  positions, about a third of cube decisions differ, and facing a double at
+  2-away it now takes much more freely — which grading against gnubg confirms is
+  right (97.5% of take/pass calls agree with it).
+- **It also exposed a deeper flaw that the table cannot fix.** Grading 24,424
+  match cube decisions against gnubg (`trainer/grade_cube.py`, new) puts our
+  doubling at 73.1% agreement and **45 mEMG** of mean error, against **2.1 mEMG**
+  for the same model in money play. The cause is that `match.py` never had a cube
+  model at all: `_mwc_from_game` plays the game out at the current cube value, so
+  keeping the cube is worth nothing and doubling almost always looks better. At
+  2-away/4-away our disagreements with gnubg run 289 "doubled when we should not"
+  against 2 the other way. The flaw predates this release (the old table measured
+  35 mEMG, also with 12% blunders); the better table feeds it more accurate
+  numbers but cannot supply the missing cube equity.
 - The packaged app's selftest now asserts the equity table actually made it into
   the bundle, by checking that its Crawford and post-Crawford answers differ.
 
