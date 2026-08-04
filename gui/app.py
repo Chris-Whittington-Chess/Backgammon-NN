@@ -1723,6 +1723,12 @@ def selftest(report_path: str) -> int:
         post_mwc = win._cube_decision(board, mover_is_human=True).mwc_nodouble
         report["post_crawford_gain"] = round(post_mwc - crawford_mwc, 4)
         win.match_to, win.score, win.crawford_used = 0, [0, 0], False
+        # The equity table's licence is all-permissive with exactly one
+        # condition: the notice travels with the data. It lives in the module
+        # docstring, which a future PyInstaller `optimize=2` would silently
+        # discard — so check it is still there in the shipped binary.
+        import met_kazaross
+        report["met_notice"] = "Neil Kazaross" in (met_kazaross.__doc__ or "")
 
         report["torch_imported"] = "torch" in sys.modules
         report["ok"] = True

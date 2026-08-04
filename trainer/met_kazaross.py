@@ -1,5 +1,26 @@
 """Kazaross XG2 match equity table — transcribed from GNU Backgammon.
 
+    Copyright (C) 2011 Neil Kazaross
+
+    Table rolled up to 9 point match by eXtreme Gammon. Then uses R/K MET
+    which was rolled up to 15 and extrapolated to 25 points.
+
+    Transcribed for use by GNUbg by Michael Petch <mpetch@capp-sysware.com>
+
+    This file is distributed as a part of the GNU Backgammon program.
+
+    Copying and distribution of this file, with or without modification,
+    are permitted in any medium without royalty provided the copyright
+    notice and this notice are preserved.  This file is offered as-is,
+    without any warranty.
+
+The notice above is reproduced from gnubg's ``met/Kazaross-XG2.xml``, whose
+numbers these are. It is the GNU all-permissive licence, not the GPL: copying,
+modification and redistribution are allowed royalty-free in any medium, and the
+single condition is that the notice travels with the data. So it must survive
+transcription into this file, regeneration of this file, and packaging into the
+distributed exe — do not strip it.
+
 Generated data, do not hand-edit. Regenerate with ``trainer/dump_met.py``.
 
 Kazaross XG2 is a rollout-derived table (XG rollouts to 9 points, GNUbg Supremo

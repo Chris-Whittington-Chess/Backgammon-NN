@@ -134,11 +134,16 @@ def main() -> None:
     if not report.get("post_crawford_gain", 0) > 0:
         fail("post-Crawford equity matched the Crawford game — met_kazaross.py "
              "is missing from the bundle, or the flag isn't reaching match.py")
+    if not report.get("met_notice"):
+        fail("the match equity table's copyright notice is not in the bundle — "
+             "its licence requires the notice to be distributed with the data, "
+             "so this build must not be shipped (did PyInstaller strip "
+             "docstrings?)")
 
     for k in ("opponents", "default_opponent", "hint_engine", "evaluator",
               "engine", "best_move_31", "equity", "sound",
               "cube_money", "cube_match", "crawford_no_cube",
-              "post_crawford_gain"):
+              "post_crawford_gain", "met_notice"):
         print(f"  {k:18} {report[k]}")
 
     size_mb = EXE.stat().st_size / 1e6

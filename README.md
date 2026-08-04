@@ -152,3 +152,12 @@ Copyright © Chris Whittington 2026. All Rights Reserved.
 The move generator is differentially tested against
 [wildbg](https://github.com/carsten-wenderdel/wildbg) (MIT/Apache-2.0). Position
 ID format follows [GNU Backgammon](https://www.gnu.org/software/gnubg/).
+
+Match play uses the **Kazaross XG2** match equity table, Copyright © 2011 Neil
+Kazaross, transcribed for GNU Backgammon by Michael Petch and distributed as part
+of that program. It is offered under the GNU all-permissive licence: copying and
+distribution, with or without modification, are permitted in any medium without
+royalty provided the copyright notice and the permission notice are preserved,
+and it is offered as-is without warranty. Both notices are reproduced in full in
+[`trainer/met_kazaross.py`](trainer/met_kazaross.py) and ship inside the app; the
+packaged build refuses to complete if they are missing.
