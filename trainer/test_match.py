@@ -128,6 +128,43 @@ def test_published_table_disagrees_with_the_cubeless_recursion():
     assert recursion > match.mwc(1, 5) + 0.05, recursion
 
 
+def test_cubeful_reduces_to_dead_at_zero_efficiency():
+    # x = 0 means the cube can never be used, which is exactly playing the game
+    # out at the current value. Anchors the blend at one end.
+    d = [0.62, 0.18, 0.01, 0.12, 0.01]
+    for owner in (CENTER, MOVER, OPP):
+        assert approx(match.cubeful_mwc(d, 4, 4, 1, owner, x=0.0),
+                      match._mwc_from_game(d, 4, 4, 1, match.DEFAULT_GAMMON_RATE)), owner
+
+
+def test_holding_the_cube_is_worth_something():
+    # The bug this model replaced: the value of keeping the cube was zero, so
+    # doubling nearly always looked better. Owning it must beat not owning it,
+    # and both must beat having the opponent own it.
+    d = [0.62, 0.18, 0.01, 0.12, 0.01]
+    mine = match.cubeful_mwc(d, 4, 4, 1, MOVER)
+    centred = match.cubeful_mwc(d, 4, 4, 1, CENTER)
+    theirs = match.cubeful_mwc(d, 4, 4, 1, OPP)
+    assert mine > centred > theirs, (mine, centred, theirs)
+
+
+def test_efficiency_actually_reaches_match_decisions():
+    # A sweep that came out bit-identical across x was how we found the cube model
+    # was missing entirely; guard against it silently going missing again.
+    d = [0.62, 0.18, 0.01, 0.12, 0.01]
+    lo = match.cubeful_mwc(d, 4, 4, 1, CENTER, x=0.2)
+    hi = match.cubeful_mwc(d, 4, 4, 1, CENTER, x=0.9)
+    assert abs(hi - lo) > 1e-4, (lo, hi)
+
+
+def test_does_not_double_the_whole_window_away_at_two_away():
+    # Leading 2-away, a doubled game wins the match, so the model used to double
+    # on almost anything: 289 wrong doubles against 2 wrong holds at this score.
+    # A modest edge is not enough.
+    d = match.match_cube_action(gammonless(0.55), a=2, b=4, cube=1, owner=CENTER)
+    assert d.action == "no double", d
+
+
 def test_beyond_the_table_falls_back_and_stays_sane():
     big = match.MAX_AWAY + 5
     m = match.mwc(big, big)

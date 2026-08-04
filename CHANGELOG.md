@@ -32,16 +32,36 @@ Downloads: [Releases](../../releases). The app is a single self-contained
   positions, about a third of cube decisions differ, and facing a double at
   2-away it now takes much more freely — which grading against gnubg confirms is
   right (97.5% of take/pass calls agree with it).
-- **It also exposed a deeper flaw that the table cannot fix.** Grading 24,424
-  match cube decisions against gnubg (`trainer/grade_cube.py`, new) puts our
-  doubling at 73.1% agreement and **45 mEMG** of mean error, against **2.1 mEMG**
-  for the same model in money play. The cause is that `match.py` never had a cube
-  model at all: `_mwc_from_game` plays the game out at the current cube value, so
-  keeping the cube is worth nothing and doubling almost always looks better. At
-  2-away/4-away our disagreements with gnubg run 289 "doubled when we should not"
-  against 2 the other way. The flaw predates this release (the old table measured
-  35 mEMG, also with 12% blunders); the better table feeds it more accurate
-  numbers but cannot supply the missing cube equity.
+- **Match play now has a cube model at all.** It turned out not to have one:
+  `_mwc_from_game` played the game out at the current cube value, so *keeping* the
+  cube was worth exactly nothing and doubling almost always looked better. Match
+  play now uses Janowski's cubeful equity in match-winning-chance space — the same
+  model money play already used, with the take and cash barriers moving with the
+  score, which is the point of it. At 2-away a doubled game wins the match, so the
+  doubling window collapses; the old model could not represent that.
+- **Measured against gnubg**, over 24,424 graded cube decisions:
+
+  | | before | after |
+  |---|---|---|
+  | agreement on double/no-double | 73.1% | **80.6%** |
+  | mean error | 45.05 mEMG | **5.77 mEMG** |
+  | blunders (>80 mEMG) | 12.21% | **2.71%** |
+  | agreement on take/pass | 97.5% | **99.4%** |
+
+  Confirmed on an independent 24,424-decision sample (5.59 mEMG, 2.67% blunders).
+  The worst score improved most: 2-away/4-away went from 138.9 to 5.7 mEMG, and
+  wrong doubles there from 289 to 143 against 2 wrong holds.
+- **Cube efficiency is now fitted rather than assumed, and the two modes differ.**
+  Match play uses **x = 0.55** against money's 0.68 — the cube is genuinely less
+  efficient in a match because the score truncates it. Money's own optimum
+  measures at 0.66 against the shipped 0.68, a 0.01 mEMG difference, so money is
+  deliberately left alone rather than chased into the noise.
+- **New tool: `trainer/grade_cube.py`.** gnubg will analyse a cube decision at any
+  score and price every alternative, so a disagreement costs a measurable number
+  of millipoints. That is a far better instrument than playing matches, which
+  would confound cube errors with checker errors and need thousands of matches to
+  see anything. It grades 2,250 decisions/sec across 60 processes — 30,000 in 13
+  seconds — and caches gnubg's answers so sweeping our own parameters is free.
 - The packaged app's selftest now asserts the equity table actually made it into
   the bundle, by checking that its Crawford and post-Crawford answers differ.
 

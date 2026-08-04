@@ -77,9 +77,12 @@ VERDICT = re.compile(r"Proper cube action:\s*(.+?)\s*$")
 # game is gone and the cube is back — post-Crawford, the case the equity table was
 # split for. Symmetric pairs are included in both directions because the cube
 # decision is not symmetric: leading 2-away is very different from trailing it.
+# The mover being 1-away is deliberately absent: it wins the match with a single
+# point at the current cube, so there is no cube decision and gnubg declines every
+# such position. Including them cost 16% of each collection for nothing.
 MATCH_SCORES = [(2, 2), (2, 4), (4, 2), (3, 5), (5, 3), (2, 6), (6, 2),
                 (4, 4), (7, 7), (5, 7), (7, 5), (3, 3), (6, 6),
-                (2, 1), (3, 1), (4, 1), (1, 2), (1, 3), (1, 4)]
+                (2, 1), (3, 1), (4, 1)]
 MATCH_LEN = 7
 
 
@@ -271,7 +274,7 @@ def our_decision(dist, a, b, x):
         d = cubemod.cube_action(dist, owner=cubemod.CENTER, x=x)
         return d.action.startswith("double"), d.take
     d = matchmod.match_cube_action(dist, a, b, cube=1, owner=cubemod.CENTER,
-                                   post_crawford=(1 in (a, b)))
+                                   post_crawford=(1 in (a, b)), x=x)
     return d.action.startswith("double"), d.take
 
 
@@ -305,8 +308,16 @@ def load(path):
     return {k: d[k] for k in d.files}
 
 
+def default_x(rec) -> float:
+    """What the shipped code uses for these records — the two modes are fitted
+    separately and do not share a value."""
+    return (cubemod.DEFAULT_EFFICIENCY if str(rec["mode"]) == "money"
+            else matchmod.DEFAULT_EFFICIENCY_MATCH)
+
+
 def score(args):
     rec = load(args.records)
+    args.x = default_x(rec) if args.x is None else args.x
     dbl_err, take_err, dbl_ok, take_ok = evaluate(rec, args.x)
     n = len(dbl_err)
     print(f"{rec['mode']} | {n} decisions | efficiency x = {args.x}")
@@ -361,7 +372,8 @@ def main():
 
     s = sub.add_parser("score", help="grade our model against a cached run")
     s.add_argument("--records", required=True)
-    s.add_argument("--x", type=float, default=cubemod.DEFAULT_EFFICIENCY)
+    s.add_argument("--x", type=float, default=None,
+                   help="override; default is whatever the shipped code uses")
     s.add_argument("--worst", type=int, default=0)
     s.set_defaults(fn=score)
 
