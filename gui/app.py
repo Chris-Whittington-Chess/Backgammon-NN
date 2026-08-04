@@ -57,7 +57,7 @@ from PySide6.QtWidgets import (
 )
 
 import bgcore
-from cube import should_double, should_take
+import cube
 from engine_api import (
     HceEngine,
     NativeNeuralEngine,
@@ -884,11 +884,34 @@ class MainWindow(QMainWindow):
             return self.evaluator.static_equity(board)
         return bgcore.hce_equity(board)
 
-    def _cube_eval(self, board):
-        """Equity for cube decisions — rollout-based when available, else static."""
+    def _cube_dist(self, board):
+        """The 5-outcome distribution `[win, win_g, win_bg, lose_g, lose_bg]` for
+        cube decisions, from the perspective of `board`'s side to move.
+
+        The distribution, not a scalar equity: gammon chances are most of what a
+        cube decision turns on, and collapsing them to one number throws that
+        away. Rollout-based when the rollout engine is available (it estimates
+        the gammon rates directly), else the net's own outputs.
+        """
         if self._cube_ro is not None:
-            return self._cube_ro.equity(board)
-        return self._pos_eval(board)
+            return list(self._cube_ro.dist(board))
+        if self.evaluator is not None and hasattr(self.evaluator, "dist"):
+            return self.evaluator.dist(board)
+        # HCE / phase-engine fallback: no gammon information available, so a
+        # gammonless distribution with the same cubeless equity.
+        e = max(-1.0, min(1.0, self._pos_eval(board)))
+        return [(e + 1.0) / 2.0, 0.0, 0.0, 0.0, 0.0]
+
+    def _cube_owner_for(self, mover_is_human: bool) -> int:
+        """Cube ownership in cube.py's frame (relative to the side to move).
+
+        The app tracks the owner absolutely (None = centred, 0 = you, 1 = engine);
+        the cube model wants it relative to whoever is on roll.
+        """
+        if self.cube_owner is None:
+            return cube.CENTER
+        owns = (self.cube_owner == 0) == mover_is_human
+        return cube.MOVER if owns else cube.OPP
 
     def _win_prob(self):
         """Your (bottom side's) win probability for the eval bar."""
@@ -1319,8 +1342,10 @@ class MainWindow(QMainWindow):
                 and not self.busy and not self.pending_double and not self.opening
                 and self.may_double(0)):
             return
-        eq = self._cube_eval(self.board)  # your equity (rollout-based when available)
-        if should_take(eq):
+        # Your position, so the distribution and the cube owner are in your frame.
+        dec = cube.cube_action(self._cube_dist(self.board),
+                               self._cube_owner_for(mover_is_human=True))
+        if dec.take:
             self.cube_value *= 2
             self.cube_owner = 1  # engine owns the cube now
             self.refresh(f"You double. Engine takes — cube is {self.cube_value}. Roll.")
@@ -1360,11 +1385,16 @@ class MainWindow(QMainWindow):
             return
         # The cube decision is a rollout too — off the UI thread with the rest.
         board = self.board
+        owner = self._cube_owner_for(mover_is_human=False)   # engine is on roll
         self.busy = True
-        self._run_async(lambda: self._cube_eval(board), self._engine_cube_decided)
+        self._run_async(lambda: cube.cube_action(self._cube_dist(board), owner),
+                        self._engine_cube_decided)
 
-    def _engine_cube_decided(self, eq):
-        if should_double(eq, True):
+    def _engine_cube_decided(self, dec):
+        # "too good" means play on for the gammon rather than cash — so the
+        # engine does NOT double, which the old equity-window heuristic could
+        # only approximate with an upper threshold.
+        if dec.action in ("double/take", "double/pass"):
             self.pending_double = True
             self.busy = True
             self.refresh(f"Engine doubles to {self.cube_value * 2}! Take or Drop?")
