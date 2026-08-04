@@ -1697,6 +1697,18 @@ def selftest(report_path: str) -> int:
         report["best_move_31"] = format_steps(ranked[0][0])
         report["equity"] = round(float(ranked[0][2]), 4)
         report["moves_ranked"] = len(ranked)
+        # Exercise a real cube decision in both modes. Importing `match` inside
+        # the bundle proves nothing about whether it RUNS there, and a frozen
+        # build that dies the moment someone starts a match would look perfectly
+        # healthy from outside — the same trap the silent-audio build fell into.
+        win.match_to = 0
+        report["cube_money"] = win._cube_decision(board, mover_is_human=True).action
+        win.match_to, win.score = 5, [3, 4]      # 2-away / 1-away
+        report["cube_match"] = win._cube_decision(board, mover_is_human=True).action
+        win.in_crawford = True
+        report["crawford_no_cube"] = not win.may_double(0)
+        win.match_to, win.in_crawford, win.score = 0, False, [0, 0]
+
         report["torch_imported"] = "torch" in sys.modules
         report["ok"] = True
     except Exception:

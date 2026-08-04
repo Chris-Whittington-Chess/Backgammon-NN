@@ -120,9 +120,19 @@ def main() -> None:
         fail(f"audio loaded but playing it did nothing — device "
              f"{report.get('sound_device')!r}, outputs {report.get('audio_outputs')}")
 
+    # A frozen build that imports `match` but cannot make a match cube decision
+    # would pass every other check here and fail the instant a user started a
+    # match, so assert the decisions actually came back.
+    for k in ("cube_money", "cube_match"):
+        if not report.get(k):
+            fail(f"{k}: no cube decision returned from the packaged app")
+    if not report.get("crawford_no_cube"):
+        fail("the Crawford game offered a cube in the packaged app")
+
     for k in ("opponents", "default_opponent", "hint_engine", "evaluator",
-              "engine", "best_move_31", "equity", "sound"):
-        print(f"  {k:16} {report[k]}")
+              "engine", "best_move_31", "equity", "sound",
+              "cube_money", "cube_match", "crawford_no_cube"):
+        print(f"  {k:18} {report[k]}")
 
     size_mb = EXE.stat().st_size / 1e6
     print(f"\nBuild OK: {EXE.relative_to(ROOT)} ({size_mb:.1f} MB)")
