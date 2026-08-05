@@ -68,6 +68,8 @@ def main():
     ap.add_argument("--ply-a", type=int, default=None, help="A's depth (default: --ply)")
     ap.add_argument("--ply-b", type=int, default=None, help="B's depth (default: --ply)")
     ap.add_argument("--candidates", type=int, default=0, help="prune 2-ply+ nodes; 0 = full")
+    ap.add_argument("--candidates-a", type=int, default=None, help="A's width (default: --candidates)")
+    ap.add_argument("--candidates-b", type=int, default=None, help="B's width (default: --candidates)")
     ap.add_argument("--games", type=int, default=400)
     ap.add_argument("--workers", type=int, default=max(1, os.cpu_count() - 2))
     ap.add_argument("--seed", type=int, default=1000,
@@ -77,7 +79,11 @@ def main():
 
     ply_a = args.ply if args.ply_a is None else args.ply_a
     ply_b = args.ply if args.ply_b is None else args.ply_b
+    cand_a = args.candidates if args.candidates_a is None else args.candidates_a
+    cand_b = args.candidates if args.candidates_b is None else args.candidates_b
     depth = f"{ply_a}-ply" if ply_a == ply_b else f"A {ply_a}-ply vs B {ply_b}-ply"
+    if cand_a != cand_b:
+        depth += f" | width A={cand_a or 'full'} B={cand_b or 'full'}"
     jobs = [(g, args.seed + g // 2, g % 2 == 0) for g in range(args.games)]  # mirrored dice
     print(f"A={args.a} vs B={args.b} at {depth} | {args.games} games, mirrored "
           f"dice, {args.workers} workers\n", flush=True)
@@ -85,7 +91,7 @@ def main():
     a_path, b_path = str(MODELS / args.a), str(MODELS / args.b)
     results = []
     with mp.Pool(args.workers, initializer=_init,
-                 initargs=(a_path, b_path, ply_a, ply_b, args.candidates)) as pool:
+                 initargs=(a_path, b_path, ply_a, ply_b, cand_a, cand_b)) as pool:
         for i, r in enumerate(pool.imap_unordered(_play, jobs, chunksize=4)):
             results.append(r)
             if (i + 1) % 50 == 0:
