@@ -34,8 +34,13 @@ Everything below is about making that net *stronger*.
 | 20 | Capacity revisited (512×256, 2.7× params) | 🔄 **Reversal** — depth/width pays again *with a stronger teacher*; but same-speed net catches it on data | no |
 | 21 | Label volume scaling (500K → 2.5M → 17.5M) | ➖ **Flattening** — 5× gave a clear win, a further 7× was unresolved (z +1.91) | yes |
 | 22 | **DAgger harvest** (positions from games vs gnubg) | ❌ **No gain** — 5M harvested rows on top of 17.5M changed nothing (z −0.64) | infra |
-| 23 | Search depth against gnubg (0 / 1 / 2 ply) | ❌ **Null** — 46.1 / 46.3 / 46.3%; search is not the constraint | no |
+| 23 | Search depth against gnubg (0 / 1 / 2 ply) | ⚠️ **RETRACTED** — the harness never varied depth; see §23 and §25 | no |
 | 24 | gnubg **rollouts** as a teacher | ❌ **Rejected on cost** — ~0.3 s/trial/position and no machine-readable output | no |
+| 25 | Equal-depth rematch vs gnubg (harness fixed) | ✅ **Parity** — 49.1% money (3,000 games), 48.5% of 400 7-point matches | tool |
+| 26 | Cube graded decision-by-decision vs gnubg | ✅ **Win** — match cube 45.1 → 5.8 mEMG; money 2.1 mEMG | **unreleased** |
+| 27 | Teacher depth: gnubg 3-ply and 4-ply labels | ❌ **Closed** — mean \|Δequity\| 0.009 / 0.007 vs 2-ply | no |
+| 28 | Search *width* (12 candidates vs 4) | ❌ **Null** — 50.5%, z +0.47, 2,600 games | no |
+| 29 | App default on a big box (rollout vs 2-ply) | ➖ **Equal strength, ~50× slower** — 51.0%, z +0.38 | recipe |
 
 ---
 
@@ -288,10 +293,17 @@ statistically indistinguishable from the 2.7×-larger net (49.5%, z −1.50, 20,
 | v1.9.0 champion | 43.4%, PPG −0.173 |
 | v1.10.0 net | **46.1%**, PPG −0.113 |
 
-~38% of the deficit to the teacher closed. Note the ceiling this implies: gnubg 2-ply beats
-the champion by ~6 points, so a *perfect* distillation would score ~56% against it. We
-capture roughly 40% of that headroom — pure distillation asymptotes at the teacher and
-cannot pass it.
+~38% of the deficit to the teacher closed.
+
+> **Correction (2026-08-05).** This section originally continued: *"gnubg 2-ply beats the
+> champion by ~6 points, so a perfect distillation would score ~56% against it. We capture
+> roughly 40% of that headroom."* Both figures come from the retracted §23 harness and
+> compare **our 0-ply against gnubg's 2-ply** — they measure a depth handicap, not the
+> quality of the distillation. Measured like for like (§25) the distilled net is at
+> **parity** with its teacher: 49.1% over 3,000 money games, 48.5% of 400 seven-point
+> matches. There is no 60% of remaining headroom. Distillation from gnubg 2-ply is
+> **finished**, not partially exploited, and any plan premised on "we still have most of the
+> gap to close" is planning against an artefact.
 
 ## 19. Warm-start vs scratch — 🔄 the advice inverts with scale
 `train_rollout.py` gained `--init` to warm-start from the champion, because training from
@@ -371,21 +383,40 @@ next to move. The states our net actually *evaluates* are the children of its ow
 positions with the opponent on roll — and those never appear among them. Harvesting only the
 free ones would systematically miss the half the student spends its capacity on.
 
-## 23. Search depth against gnubg — ❌ null
-With `--our-ply` added to the bridge (it had always pitted our *static* evaluation against a
-searching opponent, so no equal-depth comparison had ever been run), our net scores the same
-against gnubg 2-ply at every depth: **46.1% / 46.3% / 46.3%** at 0 / 1 / 2 ply, 3,000 games
-each, identical dice.
+## 23. Search depth against gnubg — ⚠️ RETRACTED (2026-08-05)
 
-This is a real null, not a broken harness: over 315 sampled positions, 0-ply and 1-ply choose
-**different moves 29.5%** of the time. Nor is it the candidate filter — 1-ply is full width,
-with no pruning and no mixed static/searched comparison, and scores the same as pruned 2-ply.
-An independent check agrees: `nn_bench` puts 1-ply over 0-ply at **51.5% ±6.9** for the
-champion, against 62.5% for an early net and 56.5% for the v1.8.0 net.
+**This experiment measured our 0-ply evaluation three times and called the agreement a
+null result.** `gnubg_h2h.py` built its net as `bgcore.Neural(path, 0, 0)` with the plies
+hardcoded. Search depth lives in that constructor, not in which scoring function is called:
+`scores()` on a net built at 0 ply returns static values however it is invoked. So `--our-ply`
+only chose between `our_best` and `our_best_searched`, and both then evaluated statically.
+`--our-candidates` was parsed and never reached the engine at all.
 
-**Lesson: as the evaluator improves, search buys less — and against a *stronger* opponent it
-buys nothing measurable. Lookahead built on a biased evaluator propagates the bias.**
-Evaluation is the binding constraint; search tuning was parked on this evidence.
+The original text is preserved below, because the way it argued is the lesson. What it
+reported:
+
+> our net scores the same against gnubg 2-ply at every depth: **46.1% / 46.3% / 46.3%** at
+> 0 / 1 / 2 ply, 3,000 games each, identical dice.
+>
+> This is a real null, not a broken harness: over 315 sampled positions, 0-ply and 1-ply
+> choose **different moves 29.5%** of the time. Nor is it the candidate filter — 1-ply is
+> full width, with no pruning and no mixed static/searched comparison, and scores the same
+> as pruned 2-ply. An independent check agrees: `nn_bench` puts 1-ply over 0-ply at
+> **51.5% ±6.9** for the champion.
+>
+> **Lesson: as the evaluator improves, search buys less** ... Evaluation is the binding
+> constraint; search tuning was parked on this evidence.
+
+Every corroboration there is about the *engines* — that 0-ply and 1-ply pick different moves
+is true and irrelevant, because the harness never asked them to. The three numbers agreeing
+to within 0.2 points across 9,000 games was not evidence of a null; **it was the bug's
+signature**, and it was read as the finding.
+
+Re-measured with the constructor fixed (§25), our true 2-ply scores **49.1%** against gnubg
+2-ply where 0-ply scores 46.1%. Search is worth roughly **+3 points, ~21 Elo** — not nothing.
+The conclusion this experiment was cited for ("evaluation is the binding constraint, park
+search tuning") does not follow from it. Search *width* is separately null (§28); search
+*depth* is not.
 
 ## 24. gnubg rollouts as a teacher — ❌ rejected on cost
 If gnubg's 2-ply sets the ceiling, its rollouts would raise it. Measured before building
@@ -397,6 +428,113 @@ Printing final results." and nothing parseable follows.
 **gnubg's 2-ply `eval` is the strongest teacher it will practically give us**, which fixes the
 distillation ceiling at ~parity with gnubg 2-ply. **Lesson: price the teacher before designing
 around it** — the same lesson as §14, learned again on the other side of the fence.
+
+> **Confirmed (2026-08-05).** The predicted ceiling is where we landed: §25 measures parity
+> with gnubg 2-ply. This section's *cost* verdict on rollouts still stands, but note that its
+> second objection — "no machine-readable output" — was specific to the CLI. gnubg's embedded
+> **Python API** returns evaluations as data (that is how §27 and the Kazaross MET were
+> obtained), so the parsing barrier has since fallen for everything it was invoked against.
+> Rollouts remain the one teacher axis §27 does **not** close: 3-ply and 4-ply agree with
+> 2-ply because all three bottom out in gnubg's same net, whereas a rollout bottoms out in
+> game outcomes. If any teacher work restarts, it starts there — and it starts by re-pricing
+> `gnubg.rolloutcontext()`, not by trusting this section's CLI-era estimate.
+
+## 25. Equal-depth rematch vs gnubg — ✅ parity
+With the §23 harness bug fixed, the comparison the project thought it had been running for
+months was run for the first time. Two harnesses, two formats:
+
+| | our net | gnubg | result |
+|---|---|---|---|
+| Money games, cubeless, mirrored dice | 2-ply | 2-ply | **49.1%**, PPG −0.022, z −0.95, 3,000 games |
+| 7-point matches, cube + Crawford | 2-ply | 2-ply | **48.5%** of matches, z −0.60, 400 matches |
+
+**We are level with gnubg at equal depth**, not 4 points behind. Both figures sit just under
+50% and neither is significant, so "level, possibly a hair behind" is the defensible reading —
+two independent harnesses agreeing at 48.5% and 49.1% makes a real gap of more than ~2 points
+unlikely.
+
+This is the number that closes §18: a net distilled from gnubg 2-ply has reached gnubg 2-ply.
+
+## 26. Grading the cube decision-by-decision — ✅ win
+`cube.py` and `match.py` had never faced an opponent: `gnubg_h2h.py` is cubeless money play,
+so the doubling logic was the largest untested surface in the project.
+
+Playing matches is the obvious test and the wrong one — a match is ~15 games of large variance
+holding a handful of cube decisions, and the result confounds cube errors with checker errors.
+`grade_cube.py` instead has gnubg analyse each cube decision directly, at any score, pricing
+every alternative, so a disagreement costs a measurable number of millipoints. **2,250
+decisions/sec across 60 processes**; 30,000 graded in 13 seconds.
+
+| | agreement | mean error | blunders >80 mEMG |
+|---|---|---|---|
+| Money | 87.8% | 2.13 mEMG | 0.67% |
+| Match, before | 73.1% | 45.05 mEMG | 12.21% |
+| Match, after | **80.6%** | **5.77 mEMG** | **2.71%** |
+
+The match model had no cube model at all: `_mwc_from_game` played the game out at the current
+cube value, so *keeping* the cube was worth nothing and doubling almost always looked better
+(289 wrong doubles against 2 wrong holds at 2-away/4-away). Replaced with Janowski's cubeful
+equity in MWC space, with score-dependent take and cash barriers. Held out on an independent
+24,424-decision sample: 5.59 mEMG.
+
+Efficiency `x` is now **fitted, not assumed**, and the two modes differ: **0.55 for match play
+against 0.68 for money**, because the score truncates the cube's value. Money's own optimum
+measures 0.66 — 0.01 mEMG from what we ship, so it was deliberately left alone rather than
+chased into the noise.
+
+**The diagnostic that found it:** sweeping `x` produced *bit-identical* results from 0.40 to
+0.95. A parameter that cannot change the answer is not a parameter.
+
+## 27. Teacher depth: gnubg 3-ply and 4-ply — ❌ closed
+Before committing to a relabelling run, measure whether the deeper teacher says anything
+different. 2,400 real positions from games against gnubg:
+
+| | mean \|Δwin\| | mean \|Δequity\| | share >0.02 equity |
+|---|---|---|---|
+| 2-ply vs 3-ply | 0.0036 | 0.0093 | 13.6% |
+| 2-ply vs 4-ply | 0.0025 | **0.0071** | **7.8%** |
+
+**4-ply is closer to 2-ply than 3-ply is** — the even/odd ply parity effect, since 2 and 4
+share the same side to move at the leaf. So most of the already-small 3-ply difference is a
+parity artefact rather than deeper insight. Cost was never the obstacle (3-ply is ~10× a
+2-ply label, not the ~10⁵× that killed rollouts); the obstacle is that it has nothing to say.
+
+Note what this does **not** close: all of these bottom out in gnubg's same network. A rollout
+bottoms out in game outcomes, which is a different signal (see §24's addendum).
+
+*Incidental:* the run appeared to cost ~6 s/position until `set display off` — the ASCII board
+echoed on every `set board` was the bottleneck, not the search. 2,400 positions then took
+under 3 minutes.
+
+## 28. Search width — ❌ null
+The ladder's search rungs are nearly flat (0-ply 1458, 1-ply 1465, 2-ply 1469), and
+`our_best_searched` documents a mechanism that would explain it: a pruned move keeps its
+static value in `scores` and can outrank a searched move's deep value. Measured directly over
+3,153 positions: mean width actually searched **3.81**, and the chosen move **was never
+searched 3.3% of the time**. The mechanism is real.
+
+It is also worthless. Widening the window three-fold — 12 candidates against the shipped 4,
+both at 2-ply, 2,600 games — scores **50.5%, z +0.47, PPG +0.018**: about +3.5 Elo with a
+confidence interval spanning −10 to +17. The static-best move is usually fine.
+
+**Search depth pays (§23), search width does not.**
+
+## 29. The app's default opponent on a big box — ➖ equal, and much slower
+`ladder.py` builds its rollout with `rollout_threads=8` to approximate a laptop, but the app
+hands it the whole machine — so the ladder's Rollout **1444** against Neural 2-ply's **1469**
+never described what the app actually runs on a 128-core box. Re-measured with the rollout
+given every core, and games played **serially**, because a fixed movetime means contention
+would starve the very engine under test:
+
+**Rollout wins 51.0%** (z +0.38, +7 Elo, 341 games) — level, not 25 Elo weaker.
+
+The finding is the cost, not the strength: **53.1 s/game**, i.e. 800 ms/move against 2-ply's
+near-instant reply, *for the same strength*. Users on big machines wait ~50× longer per move
+to face an equally strong opponent. Raising `ROLLOUT_MIN_CORES` is a one-line change that
+costs nothing. Caveat: at the current 32-core threshold the rollout gets a quarter of these
+trials, so this argues for raising the bar, not for abandoning rollouts.
+
+---
 
 ## Infrastructure that unblocked the above
 - **A memory bug was silently capping dataset size.** `train_rollout.py` built its feature
@@ -418,6 +556,23 @@ around it** — the same lesson as §14, learned again on the other side of the 
 - **Verify at the ply the app plays.** 0-ply (static-eval) gains repeatedly shrank or
   vanished under 1-ply search. The head-to-head that matters is at the search depth used in
   real play.
+- **Suspiciously clean agreement is a bug signature, not a finding.** §23 got 46.1 / 46.3 /
+  46.3% across three depths and 9,000 games and published it as a null; the three runs were
+  the same measurement, because the depth never reached the engine. §26 found the same shape
+  in a parameter sweep that returned *bit-identical* numbers from x=0.40 to 0.95. **When a
+  knob you turned changes nothing, first prove the knob is connected** — the null hypothesis
+  for a flat response is a disconnected wire, not a real invariance.
+- **A control that varies the wrong thing corroborates nothing.** §23 defended its null with
+  "0-ply and 1-ply choose different moves 29.5% of the time". True of the engines, irrelevant
+  to the harness — which never asked them to. Check that a control exercises the same code
+  path as the result it is defending.
+- **Silence is not success.** A run producing no output for ten minutes was read as "slow but
+  working" and used to clear a diagnosis; it was crashing on startup. Verify a harness by an
+  output it *must* produce, not by absence of an error.
+- **Price the teacher, then check it has something to say.** §24 priced rollouts and rejected
+  them on cost. §27 found the cheaper upgrade — 3-ply, 4-ply — affordable but *empty*: they
+  bottom out in the same network, so they repeat it. Affordable and informative are separate
+  questions and both need measuring.
 - **Separate the lever from the recipe.** The "class-aware" gain was really the LR-decay
   schedule. Always A/B one variable at a time.
 - **Share the body, specialize the head.** Output bucketing beat separate per-phase nets by
