@@ -9,8 +9,15 @@ Downloads: [Releases](../../releases). The app is a single self-contained
 
 ---
 
-## Unreleased
+## v1.12.0 — the cube, measured against GNU Backgammon
 
+- **The app now opens on the neural 2-ply engine on every machine.** It used to
+  switch to rollouts on anything with 32+ cores, on the untested assumption that
+  a big machine would let a rollout "take the lead". Measured with all 128
+  logical cores of a Threadripper, the rollout scores **51.0%** against 2-ply —
+  level, not ahead — while taking **800 ms per move against a near-instant
+  reply**. Every user on a large machine was waiting roughly 50× longer for an
+  equally strong opponent. Rollouts remain available in the Opponent box.
 - **Match equity now comes from Kazaross XG2**, the rollout-derived published
   table (transcribed from gnubg, which uses it as its own default), replacing the
   cubeless recursion v1.11.0 shipped with.
