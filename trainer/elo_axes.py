@@ -145,8 +145,15 @@ def exp2_candidate_width(budget):
             log("  exp2 hit its budget — reading the last progress line instead")
     lines = [l for l in out.read_text(errors="ignore").splitlines() if l.strip()]
     final = next((l for l in reversed(lines) if l.startswith("A (")), None)
-    tail = final or (lines[-1] if lines else "no output")
-    return ("EXP 2 candidate width: " + tail +
+    if final is None:
+        # Never append the interpretation to a failure: the overnight run printed
+        # "(A winning => pruning is costing search its value)" directly beneath an
+        # OSError, which reads like a finding rather than a crash.
+        partial = next((l for l in reversed(lines) if "/" in l and "A win" in l), None)
+        return ("EXP 2 candidate width: NO RESULT — " +
+                (f"only partial progress: {partial.strip()}" if partial
+                 else f"harness failed: {lines[-1] if lines else 'no output'}"))
+    return ("EXP 2 candidate width: " + final +
             "\n         (A winning => pruning to 4 is costing search its value)")
 
 
@@ -214,7 +221,7 @@ def _divergence(deep_ply, budget):
     # upgrade, whatever its p-value.
     material = float((de > 0.02).mean())
     call = ("worth relabelling at 3-ply" if material > 0.15 else
-            "NOT worth relabelling — 3-ply says what 2-ply says")
+            f"NOT worth relabelling — {deep_ply}-ply says what 2-ply says")
     return (f"EXP 3 teacher depth 2-ply vs {deep_ply}-ply: {len(rows)} positions | mean |dwin| "
             f"{dw.mean():.4f} (p95 {np.percentile(dw,95):.4f}) | mean |dequity| "
             f"{de.mean():.4f} (p95 {np.percentile(de,95):.4f}) | "

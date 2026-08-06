@@ -25,13 +25,15 @@ MODELS = Path(__file__).resolve().parent.parent / "models"
 _A = _B = None
 
 
-def _init(a_path, b_path, ply_a, ply_b, cand):
+def _init(a_path, b_path, ply_a, ply_b, cand_a, cand_b):
     global _A, _B
     # Separate depths so a net can be played against ITSELF at a different ply —
     # that is the only way to measure what a rung of search is worth, and it is
-    # what the Elo ladder's search steps are built from.
-    _A = bgcore.Neural(a_path, ply_a, cand if ply_a >= 2 else 0)
-    _B = bgcore.Neural(b_path, ply_b, cand if ply_b >= 2 else 0)
+    # what the Elo ladder's search steps are built from. Separate CANDIDATE
+    # widths for the same reason: pruning is a strength setting like depth, and
+    # the two sides have to differ for it to be measurable at all.
+    _A = bgcore.Neural(a_path, ply_a, cand_a if ply_a >= 2 else 0)
+    _B = bgcore.Neural(b_path, ply_b, cand_b if ply_b >= 2 else 0)
 
 
 def _best(net, board, d1, d2):
