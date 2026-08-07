@@ -220,7 +220,7 @@ def _divergence(deep_ply, budget):
     # A label difference below what training noise washes out is not a teacher
     # upgrade, whatever its p-value.
     material = float((de > 0.02).mean())
-    call = ("worth relabelling at 3-ply" if material > 0.15 else
+    call = (f"worth relabelling at {deep_ply}-ply" if material > 0.15 else
             f"NOT worth relabelling — {deep_ply}-ply says what 2-ply says")
     return (f"EXP 3 teacher depth 2-ply vs {deep_ply}-ply: {len(rows)} positions | mean |dwin| "
             f"{dw.mean():.4f} (p95 {np.percentile(dw,95):.4f}) | mean |dequity| "
