@@ -9,6 +9,31 @@ Downloads: [Releases](../../releases). The app is a single self-contained
 
 ---
 
+## v1.12.1 — an engine panic no longer takes the app with it
+
+- **The app could die outright, with no traceback and no dialog** — the window
+  simply vanished, which reads from the outside like an illegal instruction. A
+  panic in the Rust engine crosses the PyO3 boundary as
+  `pyo3_runtime.PanicException`, which derives from `BaseException`, *not*
+  `Exception`. The worker that runs every engine call off the UI thread guarded
+  with `except Exception`, so a panic slipped straight through it, escaped
+  `QRunnable.run()`, and an unhandled exception there takes the whole process
+  down.
+- Widening that one guard would have moved the crash rather than removed it: the
+  completion handler filtered errors with `isinstance(result, Exception)`, which
+  a `PanicException` also fails, so the captured panic would have been handed on
+  as a *game result* and raised on the UI thread while being unpacked — the same
+  fatal-in-a-slot abort one step later, now with the panic message swallowed.
+  Both tests widen together, which is the actual fix.
+- A panic now surfaces as `Engine error: …` in the status bar and play
+  continues. Rust still prints the panic's `file:line` to stderr, so launching
+  from a console names the site.
+- **The panic that prompted this is still unidentified** — reported from a
+  v1.11.0 match, a few moves after a take. The likeliest candidates are the
+  thirteen `partial_cmp().unwrap()` sorts in `search.rs` and `rollout.rs`, any of
+  which panics the moment a NaN reaches it. That is a hypothesis, not a finding;
+  this release makes the next occurrence diagnosable instead of fatal.
+
 ## v1.12.0 — the cube, measured against GNU Backgammon
 
 - **The app now opens on the neural 2-ply engine on every machine.** It used to
