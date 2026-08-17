@@ -144,7 +144,12 @@ class _Task(QRunnable):
     def run(self):
         try:
             result = self._fn()
-        except Exception as exc:      # deliver it; the UI thread decides what to do
+        except BaseException as exc:  # deliver it; the UI thread decides what to do
+            # BaseException, not Exception: a panic in the Rust engine crosses the
+            # PyO3 boundary as `pyo3_runtime.PanicException`, which derives from
+            # BaseException and so slips straight through `except Exception`. It
+            # then escapes run(), and an unhandled exception in a QRunnable takes
+            # the whole process down with no traceback — the app just vanishes.
             result = exc
         self.signals.done.emit(result, self._gen)
 
@@ -1182,7 +1187,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "sync_engine", False):
             try:
                 result = fn()
-            except Exception as exc:  # noqa: BLE001 — mirror _on_task_done
+            except BaseException as exc:  # noqa: BLE001 — mirror _Task.run
                 self.busy = False
                 self.refresh(f"Engine error: {exc}")
                 return
@@ -1202,9 +1207,15 @@ class MainWindow(QMainWindow):
             self._tasks.remove(entry)
         if gen != self._gen or self.game_over:
             return                      # a new game started while this was thinking
-        if isinstance(result, Exception):
+        # BaseException, to match what _Task.run captures: an engine panic arrives
+        # as a PanicException, and testing for Exception alone would hand it on as
+        # if it were a result — unpacking it as one raises on the UI thread, which
+        # is the same fatal-in-a-slot crash one step later.
+        if isinstance(result, BaseException):
             self.busy = False
             self.refresh(f"Engine error: {result}")
+            return
+        if entry is None:               # no callback to run it through
             return
         entry[1](result)
 
